@@ -9,11 +9,12 @@ import userRoutes from './routes/userRoutes'; // Import user routes
 import authMiddleware from './middleware/auth'; // Import auth middleware
 import passport from 'passport';
 import './config/passport'; // Import passport config
+import { corsOptions } from './config/cors';
 
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(passport.initialize());
 // IMPORTANT: Square webhooks send raw body, so we need a conditional body parser
 app.use((req, res, next) => {

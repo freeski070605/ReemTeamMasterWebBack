@@ -1,0 +1,21 @@
+{
+  "parser": "@typescript-eslint/parser",
+  "plugins": ["@typescript-eslint"],
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended"
+  ],
+  "rules": {
+    "no-restricted-syntax": [
+      "warn",
+      {
+        "selector": "NewExpression[callee.name='Schema'] Property[key.name='type'][value.type='ArrayExpression']",
+        "message": "Avoid defining array subdocuments with schemas or types directly. Use Schema.Types.Mixed instead for performance and flexibility."
+      },
+      {
+        "selector": "NewExpression[callee.name='Schema'] ArrayExpression NewExpression[callee.name='Schema']",
+        "message": "Do not nest Schemas directly. Use Schema.Types.Mixed for subdocuments."
+      }
+    ]
+  }
+}

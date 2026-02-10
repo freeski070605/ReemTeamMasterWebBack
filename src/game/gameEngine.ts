@@ -115,8 +115,10 @@ export const handleBuyIn = async (gameState: IGameState): Promise<IGameState> =>
       if (playerWallet.availableBalance < gameState.baseStake) {
         throw new Error(`Player ${player.username} has insufficient funds for the ante.`);
       }
-      
-      // No wallet modification here, just validation
+
+      // Deduct ante immediately so round-end reflects the stake loss.
+      playerWallet.availableBalance -= gameState.baseStake;
+      await playerWallet.save();
     }
     
     return { ...player, currentBuyIn: gameState.baseStake };
@@ -138,12 +140,26 @@ export const handleRoundEndPayouts = async (gameState: IGameState): Promise<IGam
 
   const payoutData = calculatePayouts(gameState);
   await settleWallets(gameState, payoutData);
+  const baseLosses: { [userId: string]: number } = {};
+  for (const player of gameState.players) {
+    if (player.userId !== gameState.roundWinnerId) {
+      baseLosses[player.userId] = gameState.baseStake;
+    }
+  }
 
   const updatedGameState = {
     ...gameState,
     payouts: {
       [gameState.roundWinnerId!]: payoutData.winnerPayout,
-      ...payoutData.penalties.reduce((acc, p) => ({ ...acc, [p.playerId]: -p.amount }), {}),
+      ...Object.entries(baseLosses).reduce((acc, [playerId, amount]) => {
+        acc[playerId] = -amount;
+        return acc;
+      }, {} as { [userId: string]: number }),
+      ...payoutData.penalties.reduce((acc, p) => {
+        const existing = acc[p.playerId] ?? 0;
+        acc[p.playerId] = existing - p.amount;
+        return acc;
+      }, {} as { [userId: string]: number }),
     },
   };
   
@@ -251,7 +267,9 @@ const settleWallets = async (gameState: IGameState, payoutData: { winnerPayout: 
         username: p.username,
         stake: gameState.baseStake,
         buyIn: p.currentBuyIn,
-        payout: p.userId === roundWinnerId ? winnerPayout : - (penalties.find(pen => pen.playerId === p.userId)?.amount || 0),
+        payout: p.userId === roundWinnerId
+          ? winnerPayout
+          : -gameState.baseStake - (penalties.find(pen => pen.playerId === p.userId)?.amount || 0),
         isAI: p.isAI,
         finalHandValue: gameState.handScores ? gameState.handScores[p.userId] : 0,
       })),

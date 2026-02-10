@@ -35,6 +35,66 @@ const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: 
   }
 };
 
+const buildPlayersWithUsernames = async (
+  table: TableDocument,
+  tableId: string
+): Promise<Array<{ userId: string; username: string; isAI: boolean }>> => {
+  const redisPlayers = await redisClient.hGetAll(`table:${tableId}:players`);
+  const players: Array<{ userId: string; username: string; isAI: boolean }> = [];
+  const missingHumanIds: string[] = [];
+
+  for (const player of table.players) {
+    const userId = player.userId.toString();
+    const redisEntry = redisPlayers[userId];
+    if (redisEntry) {
+      try {
+        const data = JSON.parse(redisEntry);
+        players.push({
+          userId,
+          username: data.username || `Player ${userId.substring(0, 4)}`,
+          isAI: player.isAI,
+        });
+        continue;
+      } catch {
+        // fall through to DB lookup/fallback
+      }
+    }
+
+    if (!player.isAI) {
+      missingHumanIds.push(userId);
+    }
+
+    players.push({
+      userId,
+      username: "",
+      isAI: player.isAI,
+    });
+  }
+
+  if (missingHumanIds.length > 0) {
+    const users = await User.find({
+      _id: { $in: missingHumanIds.map(id => new mongoose.Types.ObjectId(id)) },
+    }).select("username");
+    const userMap = new Map(users.map(u => [u._id.toString(), u.username]));
+
+    for (const player of players) {
+      if (!player.username && !player.isAI) {
+        player.username = userMap.get(player.userId) ?? `Player ${player.userId.substring(0, 4)}`;
+      }
+    }
+  }
+
+  for (const player of players) {
+    if (!player.username) {
+      player.username = player.isAI
+        ? `AI_${player.userId.substring(0, 4)}`
+        : `Player ${player.userId.substring(0, 4)}`;
+    }
+  }
+
+  return players;
+};
+
 // Helper to add AI players
 const addAIPlayers = async (table: TableDocument, currentPlayers: Array<{ userId: string; username: string; isAI: boolean }>): Promise<Array<{ userId: string; username: string; isAI: boolean }>> => {
   const updatedPlayers = [...currentPlayers];
@@ -363,8 +423,6 @@ const setupSocketHandlers = (io: Server) => {
       socket.userId = userId;
       socket.username = username;
       
-      let playersInTable = table.players.map(p => ({ userId: p.userId.toString(), username: "Player " + p.userId.toString().substring(0,4), isAI: p.isAI }));
-
       // Check if we need to add an AI to start the game immediately (1 User vs 1 AI)
       if (table.currentPlayerCount === 1) {
           console.log(`Only 1 player in table ${tableId}, adding an AI opponent.`);
@@ -380,8 +438,9 @@ const setupSocketHandlers = (io: Server) => {
           await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
 
           // Update local players list
-          playersInTable.push({ userId: aiUserId, username: aiUsername, isAI: true });
       }
+
+      let playersInTable = await buildPlayersWithUsernames(table, tableId);
 
       // Add AI players if not enough human players to start a game
       if (table.currentPlayerCount < table.minPlayers) {
@@ -422,7 +481,7 @@ const setupSocketHandlers = (io: Server) => {
       if (!gameState) {
         // This block should ideally not be reached if game starts above, but as a fallback
         // In a real scenario, this would mean starting a game with initial human players, awaiting more.
-        const playersForNewGame = table.players.map(p => ({ userId: p.userId.toString(), username: "Player " + p.userId.toString().substring(0,4), isAI: p.isAI }));
+        const playersForNewGame = await buildPlayersWithUsernames(table, tableId);
         gameState = await initializeGame(table, playersForNewGame);
         // if (gameState) { // Already checked by next if block
         await saveGameState(gameState);

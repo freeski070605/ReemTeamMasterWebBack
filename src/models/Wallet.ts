@@ -16,7 +16,7 @@ const walletSchema = new Schema({
   availableBalance: {
     type: Number,
     required: true,
-    default: 0,
+    default: 25,
   },
   pendingWithdrawals: {
     type: Number,

@@ -128,6 +128,7 @@ router.post('/facebook/token', async (req: Request, res: Response) => {
       params: {
         input_token: accessToken,
         access_token: appAccessToken,
+        redirect_uri: process.env.FACEBOOK_REDIRECT_URI,
       },
     });
 

@@ -3,10 +3,10 @@ import { Strategy as FacebookStrategy } from 'passport-facebook';
 import User from '../models/User';
 
 if (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET) {
-  passport.use(new FacebookStrategy({
+    passport.use(new FacebookStrategy({
       clientID: process.env.FACEBOOK_APP_ID,
       clientSecret: process.env.FACEBOOK_APP_SECRET,
-      callbackURL: '/auth/facebook/callback',
+      callbackURL: process.env.FACEBOOK_REDIRECT_URI,
       profileFields: ['id', 'displayName', 'photos', 'email'],
     },
     async (accessToken, refreshToken, profile, done) => {

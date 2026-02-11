@@ -1,15 +1,30 @@
 import passport from 'passport';
-import { Strategy as FacebookStrategy } from 'passport-facebook';
+import {
+  Strategy as FacebookStrategy,
+  type Profile as FacebookProfile,
+  type VerifyFunction,
+} from 'passport-facebook';
 import User from '../models/User';
 
-if (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET) {
+const facebookAppId = process.env.FACEBOOK_APP_ID;
+const facebookAppSecret = process.env.FACEBOOK_APP_SECRET;
+const facebookRedirectUri = process.env.FACEBOOK_REDIRECT_URI;
+
+if (facebookAppId && facebookAppSecret && facebookRedirectUri) {
+    type FacebookDone = Parameters<VerifyFunction>[3];
+
     passport.use(new FacebookStrategy({
-      clientID: process.env.FACEBOOK_APP_ID,
-      clientSecret: process.env.FACEBOOK_APP_SECRET,
-      callbackURL: process.env.FACEBOOK_REDIRECT_URI,
+      clientID: facebookAppId,
+      clientSecret: facebookAppSecret,
+      callbackURL: facebookRedirectUri,
       profileFields: ['id', 'displayName', 'photos', 'email'],
     },
-    async (accessToken, refreshToken, profile, done) => {
+    async (
+      accessToken: string,
+      refreshToken: string,
+      profile: FacebookProfile,
+      done: FacebookDone
+    ) => {
       try {
         let user = await User.findOne({ 'socialProvider.id': profile.id });
 

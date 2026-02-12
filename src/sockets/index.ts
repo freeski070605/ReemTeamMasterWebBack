@@ -416,12 +416,6 @@ const setupSocketHandlers = (io: Server) => {
         return socket.emit("gameError", { message: "Table is full." });
       }
 
-      // Validate player's balance
-      const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(userId) });
-      if (!wallet || wallet.availableBalance < table.stake * 4) {
-        return socket.emit("gameError", { message: "Insufficient funds to join this table." });
-      }
-
       // Check if player is already in the table
       const existingPlayer = table.players.find(p => p.userId.toString() === userId);
       if (existingPlayer) {
@@ -440,6 +434,12 @@ const setupSocketHandlers = (io: Server) => {
         } else {
           return socket.emit("gameError", { message: "No active game state found for this table." });
         }
+      }
+
+      // Validate player's balance for new joins only.
+      const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(userId) });
+      if (!wallet || wallet.availableBalance < table.stake * 4) {
+        return socket.emit("gameError", { message: "Insufficient funds to join this table." });
       }
 
       // Add player to table in MongoDB
@@ -557,6 +557,17 @@ const setupSocketHandlers = (io: Server) => {
     });
 
     socket.on("requestLeaveTable", async ({ tableId, userId }: { tableId: string; userId: string }) => {
+      const gameState = await loadGameState(tableId);
+      if (!gameState || gameState.status !== "in-progress") {
+        const table = await Table.findById(tableId);
+        const playerInfo = table?.players.find((p) => p.userId.toString() === userId);
+        if (playerInfo) {
+          const usernameFromTable = playerInfo.isAI ? `AI_${userId.substring(0, 4)}` : socket.username ?? `Player ${userId.substring(0, 4)}`;
+          await handlePlayerLeave(io, tableId, userId, usernameFromTable);
+        }
+        return;
+      }
+
       console.log(`Player ${userId} wants to leave table ${tableId} after the round.`);
       await redisClient.sAdd(`table:${tableId}:players:leaving`, userId);
       socket.emit("ackLeaveRequest");

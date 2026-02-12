@@ -187,6 +187,9 @@ const handleRoundTransition = async (io: Server, tableId: string) => {
       
       io.to(tableId).emit("tableUpdate", { message: "Starting new round...", table, gameState: newGameState });
       io.to(tableId).emit("initialGameState", newGameState);
+      if (newGameState.players[newGameState.currentPlayerIndex]?.isAI) {
+        handleAITurn(io, tableId);
+      }
 
     } catch (e) {
       console.error("Error in round transition:", e);
@@ -430,6 +433,9 @@ const setupSocketHandlers = (io: Server) => {
 
         const gameState = await loadGameState(tableId);
         if (gameState) {
+          if (gameState.players[gameState.currentPlayerIndex]?.isAI) {
+            handleAITurn(io, tableId);
+          }
           return io.to(socket.id).emit("initialGameState", gameState); // Send existing state
         } else {
           return socket.emit("gameError", { message: "No active game state found for this table." });
@@ -497,6 +503,9 @@ const setupSocketHandlers = (io: Server) => {
         await table.save();
         io.to(tableId).emit("tableUpdate", { message: `${username} joined, game starting with AI.`, table, gameState });
         io.to(socket.id).emit("initialGameState", gameState);
+        if (gameState.players[gameState.currentPlayerIndex]?.isAI) {
+          handleAITurn(io, tableId);
+        }
         return; // Exit after starting game
       }
 
@@ -519,6 +528,9 @@ const setupSocketHandlers = (io: Server) => {
 
       io.to(tableId).emit("tableUpdate", { message: `${username} joined the table.`, table, gameState });
       io.to(socket.id).emit("initialGameState", gameState);
+      if (gameState.players[gameState.currentPlayerIndex]?.isAI) {
+        handleAITurn(io, tableId);
+      }
     });
 
     // Event: Player leaves a table (or disconnects)

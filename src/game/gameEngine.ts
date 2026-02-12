@@ -13,6 +13,7 @@ export interface IGameState {
   players: Array<{
     userId: string;
     username: string;
+    avatarUrl?: string;
     hand: Card[];
     isAI: boolean;
     isHitLocked: boolean;
@@ -62,6 +63,23 @@ export const calculateAllHandScores = (players: Array<{ userId: string; hand: Ca
     scores[player.userId] = calculateHandValue(player.hand);
   }
   return scores;
+};
+
+const getLowestScoreWinnerId = (
+  players: Array<{ userId: string; hand: Card[] }>
+): { winnerId: string; lowestScore: number } => {
+  let lowestScore = Infinity;
+  let winnerId = "";
+
+  for (const player of players) {
+    const score = calculateHandValue(player.hand);
+    if (score < lowestScore) {
+      lowestScore = score;
+      winnerId = player.userId;
+    }
+  }
+
+  return { winnerId, lowestScore };
 };
 
 /**
@@ -305,7 +323,11 @@ const settleWallets = async (gameState: IGameState, payoutData: { winnerPayout: 
  * @param players The players participating in the game.
  * @returns The initial game state.
  */
-export const initializeGame = async (table: TableDocument, players: Array<{ userId: string; username: string; isAI: boolean }>): Promise<IGameState> => {
+export const initializeGame = async (
+  table: TableDocument,
+  players: Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }>,
+  options?: { dealerIndex?: number }
+): Promise<IGameState> => {
   const fullDeck = createDeck();
   const shuffledDeck = shuffleDeck(fullDeck);
   const { remainingDeck, playerHands } = dealCards(shuffledDeck, players.length, 5);
@@ -313,6 +335,7 @@ export const initializeGame = async (table: TableDocument, players: Array<{ user
   const initialPlayersState = players.map((player, index) => ({
     userId: player.userId.toString(),
     username: player.username,
+    avatarUrl: player.avatarUrl,
     hand: playerHands[index],
     isAI: player.isAI,
     isHitLocked: false,
@@ -323,14 +346,19 @@ export const initializeGame = async (table: TableDocument, players: Array<{ user
     restrictedDiscardCard: null,
   }));
 
+  const dealerIndex = options?.dealerIndex !== undefined
+    ? ((options.dealerIndex % players.length) + players.length) % players.length
+    : 0;
+  const firstTurnPlayerIndex = players.length > 0 ? (dealerIndex + 1) % players.length : 0;
+
   let initialGameState: IGameState = {
     tableId: table._id.toString(),
-    currentDealerIndex: 0, // Will rotate
+    currentDealerIndex: dealerIndex, // Rotates clockwise between rounds
     players: initialPlayersState,
     deck: remainingDeck,
     discardPile: [],
     turn: 1,
-    currentPlayerIndex: 0, // Start with the player after the dealer
+    currentPlayerIndex: firstTurnPlayerIndex, // Start with player clockwise from dealer
     lastAction: null,
     status: 'starting', // Explicitly set as literal type
     baseStake: table.stake,
@@ -442,17 +470,7 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
 
   if (!drawnCard) {
     // Deck is empty, end the round and determine winner by lowest hand value
-    let lowestScore = Infinity;
-    let winnerId = '';
-    
-    // Simple logic to find lowest score
-    for (const p of gameState.players) {
-        const score = calculateHandValue(p.hand);
-        if (score < lowestScore) {
-            lowestScore = score;
-            winnerId = p.userId;
-        }
-    }
+    const { winnerId, lowestScore } = getLowestScoreWinnerId(gameState.players);
 
     const updatedGameState: IGameState = {
         ...gameState,
@@ -492,7 +510,7 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
  * @param cardToDiscard The card to discard.
  * @returns The updated game state.
  */
-export const playerDiscardCard = (gameState: IGameState, userId: string, cardToDiscard: Card): IGameState => {
+export const playerDiscardCard = async (gameState: IGameState, userId: string, cardToDiscard: Card): Promise<IGameState> => {
   const playerIndex = gameState.players.findIndex(p => p.userId === userId);
   if (playerIndex === -1) {
     throw new Error(`Player ${userId} not found.`);
@@ -519,12 +537,25 @@ export const playerDiscardCard = (gameState: IGameState, userId: string, cardToD
 
   const newDiscardPile = [...gameState.discardPile, cardToDiscard];
 
-  return {
+  const updatedGameState: IGameState = {
     ...gameState,
     players: updatedPlayers,
     discardPile: newDiscardPile,
     lastAction: { type: 'discardCard', payload: { userId, card: cardToDiscard } as any, timestamp: Date.now() },
   };
+
+  if (newHand.length === 0) {
+    const roundEndState: IGameState = {
+      ...updatedGameState,
+      status: 'round-end',
+      roundEndedBy: 'REGULAR',
+      roundWinnerId: userId,
+      handScores: calculateAllHandScores(updatedGameState.players),
+    };
+    return await handleRoundEndPayouts(roundEndState);
+  }
+
+  return updatedGameState;
 };
 
 // Helper to get card value for sorting and sequence checking
@@ -792,13 +823,15 @@ export const playerDrop = async (gameState: IGameState, userId: string): Promise
     throw new Error(`Player ${userId} cannot drop while hit-locked.`);
   }
 
+  const { winnerId, lowestScore } = getLowestScoreWinnerId(gameState.players);
+
   // Acknowledge drop and end the round
   let updatedGameState: IGameState = {
     ...gameState,
     status: 'round-end',
-    lastAction: { type: 'drop', payload: { userId, handValue: calculateHandValue(player.hand) } as any, timestamp: Date.now() },
+    lastAction: { type: 'drop', payload: { userId, handValue: calculateHandValue(player.hand), winnerId, lowestScore } as any, timestamp: Date.now() },
     roundEndedBy: 'REGULAR',
-    roundWinnerId: userId, // Assuming the dropper is the potential winner unless caught
+    roundWinnerId: winnerId,
     handScores: calculateAllHandScores(gameState.players),
   };
 

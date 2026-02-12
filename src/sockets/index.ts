@@ -38,9 +38,9 @@ const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: 
 const buildPlayersWithUsernames = async (
   table: TableDocument,
   tableId: string
-): Promise<Array<{ userId: string; username: string; isAI: boolean }>> => {
+): Promise<Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }>> => {
   const redisPlayers = await redisClient.hGetAll(`table:${tableId}:players`);
-  const players: Array<{ userId: string; username: string; isAI: boolean }> = [];
+  const players: Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }> = [];
   const missingHumanIds: string[] = [];
 
   for (const player of table.players) {
@@ -53,6 +53,7 @@ const buildPlayersWithUsernames = async (
           userId,
           username: data.username || `Player ${userId.substring(0, 4)}`,
           isAI: player.isAI,
+          avatarUrl: data.avatarUrl,
         });
         continue;
       } catch {
@@ -68,18 +69,22 @@ const buildPlayersWithUsernames = async (
       userId,
       username: "",
       isAI: player.isAI,
+      avatarUrl: undefined,
     });
   }
 
   if (missingHumanIds.length > 0) {
     const users = await User.find({
       _id: { $in: missingHumanIds.map(id => new mongoose.Types.ObjectId(id)) },
-    }).select("username");
-    const userMap = new Map(users.map(u => [u._id.toString(), u.username]));
+    }).select("username avatarUrl");
+    const userMap = new Map(users.map(u => [u._id.toString(), { username: u.username, avatarUrl: u.avatarUrl }]));
 
     for (const player of players) {
       if (!player.username && !player.isAI) {
-        player.username = userMap.get(player.userId) ?? `Player ${player.userId.substring(0, 4)}`;
+        player.username = userMap.get(player.userId)?.username ?? `Player ${player.userId.substring(0, 4)}`;
+      }
+      if (!player.avatarUrl && !player.isAI) {
+        player.avatarUrl = userMap.get(player.userId)?.avatarUrl;
       }
     }
   }
@@ -96,7 +101,7 @@ const buildPlayersWithUsernames = async (
 };
 
 // Helper to add AI players
-const addAIPlayers = async (table: TableDocument, currentPlayers: Array<{ userId: string; username: string; isAI: boolean }>): Promise<Array<{ userId: string; username: string; isAI: boolean }>> => {
+const addAIPlayers = async (table: TableDocument, currentPlayers: Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }>): Promise<Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }>> => {
   const updatedPlayers = [...currentPlayers];
   const numAIPlayersToAdd = table.maxPlayers - currentPlayers.length;
 
@@ -119,6 +124,7 @@ const handleRoundTransition = async (io: Server, tableId: string) => {
     try {
       const table = await Table.findById(tableId);
       if (!table) return;
+      const previousGameState = await loadGameState(tableId);
 
       const leavingPlayerIds = await redisClient.sMembers(`table:${tableId}:players:leaving`);
       for (const userId of leavingPlayerIds) {
@@ -128,14 +134,8 @@ const handleRoundTransition = async (io: Server, tableId: string) => {
       await redisClient.del(`table:${tableId}:players:leaving`);
 
 
-      // Fetch current players from Redis to get Usernames
-      const redisPlayers = await redisClient.hGetAll(`table:${tableId}:players`);
-      let playersWithDetails: Array<{ userId: string; username: string; isAI: boolean }> = [];
-      
-      for (const [uid, dataStr] of Object.entries(redisPlayers)) {
-         const data = JSON.parse(dataStr);
-         playersWithDetails.push({ userId: uid, username: data.username, isAI: data.isAI });
-      }
+      // Rebuild players from table order so dealer rotation remains clockwise and stable.
+      let playersWithDetails = await buildPlayersWithUsernames(table, tableId);
 
       // Filter: Humans vs AIs
       const humans = playersWithDetails.filter(p => !p.isAI);
@@ -163,7 +163,11 @@ const handleRoundTransition = async (io: Server, tableId: string) => {
       }
 
       // Start new game
-      const newGameState = await initializeGame(table, nextGamePlayers);
+      const nextDealerIndex = previousGameState
+        ? (previousGameState.currentDealerIndex + 1) % Math.max(1, nextGamePlayers.length)
+        : 0;
+
+      const newGameState = await initializeGame(table, nextGamePlayers, { dealerIndex: nextDealerIndex });
       await saveGameState(newGameState);
       
       io.to(tableId).emit("tableUpdate", { message: "Starting new round...", table, gameState: newGameState });
@@ -220,9 +224,15 @@ const handleAITurn = async (io: Server, tableId: string) => {
 
         } else if (aiAction.type === 'discard') {
            if (aiAction.payload?.card) {
-               updatedGameState = playerDiscardCard(updatedGameState, currentPlayer.userId, aiAction.payload.card);
+               updatedGameState = await playerDiscardCard(updatedGameState, currentPlayer.userId, aiAction.payload.card);
                await saveGameState(updatedGameState);
                io.to(tableId).emit("gameStateUpdate", updatedGameState);
+
+               if (updatedGameState.status === 'round-end') {
+                  await emitWalletBalanceUpdates(io, tableId, updatedGameState);
+                  handleRoundTransition(io, tableId);
+                  return;
+               }
                
                console.log(`[DEBUG] AI Discard success. Moving to next turn.`);
                const nextGameState = nextTurn(updatedGameState);
@@ -375,7 +385,7 @@ const setupSocketHandlers = (io: Server) => {
     console.log(`User connected: ${socket.id}`);
 
     // Event: Player joins a table
-    socket.on("joinTable", async ({ tableId, userId, username }: { tableId: string; userId: string; username: string }) => {
+    socket.on("joinTable", async ({ tableId, userId, username, avatarUrl }: { tableId: string; userId: string; username: string; avatarUrl?: string }) => {
       console.log(`User ${username} (${userId}) attempting to join table ${tableId}`);
       let table = await Table.findById(tableId);
       if (!table) {
@@ -413,7 +423,7 @@ const setupSocketHandlers = (io: Server) => {
       table.players.push({ userId: new mongoose.Types.ObjectId(userId), isAI: false } as any);
       table.currentPlayerCount++;
       // Update Redis for table occupancy
-      await redisClient.hSet(`table:${tableId}:players`, userId, JSON.stringify({ username, isAI: false }));
+      await redisClient.hSet(`table:${tableId}:players`, userId, JSON.stringify({ username, isAI: false, avatarUrl: avatarUrl ?? null }));
       await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
 
       // Join the socket room immediately so the player receives updates even if the game starts immediately
@@ -434,7 +444,7 @@ const setupSocketHandlers = (io: Server) => {
           table.currentPlayerCount++;
           
           // Add to Redis
-          await redisClient.hSet(`table:${tableId}:players`, aiUserId, JSON.stringify({ username: aiUsername, isAI: true }));
+          await redisClient.hSet(`table:${tableId}:players`, aiUserId, JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null }));
           await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
 
           // Update local players list
@@ -458,7 +468,7 @@ const setupSocketHandlers = (io: Server) => {
              // Check if already in redis? hSet overwrites so it's fine, but we only really need to add the new 1v1 AI if it wasn't there.
              // The 1v1 AI was added to Redis in the block above (lines 143), so we might not need this loop if we don't add more AIs.
              // However, for safety/consistency, we can ensure they are in Redis.
-             await redisClient.hSet(`table:${tableId}:players`, player.userId, JSON.stringify({ username: player.username, isAI: true }));
+             await redisClient.hSet(`table:${tableId}:players`, player.userId, JSON.stringify({ username: player.username, isAI: true, avatarUrl: null }));
           }
         }
         // table.currentPlayerCount is already updated if we added the 1v1 AI.
@@ -552,9 +562,15 @@ const setupSocketHandlers = (io: Server) => {
       let gameState = await loadGameState(tableId);
       if (gameState) {
         try {
-          const updatedGameState = playerDiscardCard(gameState, userId, card);
+          const updatedGameState = await playerDiscardCard(gameState, userId, card);
           await saveGameState(updatedGameState);
           io.to(tableId).emit("gameStateUpdate", updatedGameState);
+
+          if (updatedGameState.status === "round-end") {
+            await emitWalletBalanceUpdates(io, tableId, updatedGameState);
+            handleRoundTransition(io, tableId);
+            return;
+          }
           
           // After discarding, it\'s usually the next player\'s turn
           const nextGameState = nextTurn(updatedGameState);

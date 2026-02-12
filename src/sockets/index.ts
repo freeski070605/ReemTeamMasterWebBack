@@ -122,17 +122,32 @@ const addAIPlayers = async (table: TableDocument, currentPlayers: Array<{ userId
 const handleRoundTransition = async (io: Server, tableId: string) => {
   setTimeout(async () => {
     try {
-      const table = await Table.findById(tableId);
+      let table = await Table.findById(tableId);
       if (!table) return;
       const previousGameState = await loadGameState(tableId);
 
       const leavingPlayerIds = await redisClient.sMembers(`table:${tableId}:players:leaving`);
       for (const userId of leavingPlayerIds) {
-        // The leaveTable logic will handle the removal from DB and Redis
-        io.to(tableId).emit("playerLeft", { userId }); // Notify clients
+        const leavingPlayer = previousGameState?.players.find((player) => player.userId === userId);
+        const fallbackUsername = `Player ${userId.substring(0, 4)}`;
+        await handlePlayerLeave(
+          io,
+          tableId,
+          userId,
+          leavingPlayer?.username ?? fallbackUsername
+        );
       }
       await redisClient.del(`table:${tableId}:players:leaving`);
 
+      table = await Table.findById(tableId);
+      if (!table) return;
+      if (table.currentPlayerCount < table.minPlayers || table.players.length === 0) {
+        table.status = "waiting";
+        table.currentMatchId = undefined;
+        await table.save();
+        io.to(tableId).emit("tableUpdate", { message: "Waiting for players to start the next round.", table });
+        return;
+      }
 
       // Rebuild players from table order so dealer rotation remains clockwise and stable.
       let playersWithDetails = await buildPlayersWithUsernames(table, tableId);
@@ -176,7 +191,7 @@ const handleRoundTransition = async (io: Server, tableId: string) => {
     } catch (e) {
       console.error("Error in round transition:", e);
     }
-  }, 15000); // 15 second delay
+  }, 30000); // 30 second delay
 };
 
 // Helper to handle AI turns
@@ -373,6 +388,8 @@ const handlePlayerLeave = async (io: Server, tableId: string, userId: string, us
         io.to(tableId).emit("tableUpdate", { message: `${username} left the table.`, table, gameState });
       }
     }
+
+    io.to(tableId).emit("playerLeft", { userId });
   } finally {
     await redisClient.del(lockKey);
   }

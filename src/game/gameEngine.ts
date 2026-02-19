@@ -39,6 +39,8 @@ export interface IGameState {
   caughtDroppingPlayerId?: string; // If a player was caught dropping
   handScores?: { [userId: string]: number }; // Stores final hand scores for all players at round end
   payouts?: { [userId: string]: number };
+  roundReadyPlayerIds?: string[];
+  roundReadyDeadline?: number | null;
   // Other game state properties
 }
 
@@ -366,6 +368,8 @@ export const initializeGame = async (
     pot: 0, // Initialize pot to 0
     lockedAntes: {},
     roundEndedBy: null,
+    roundReadyPlayerIds: [],
+    roundReadyDeadline: null,
   };
 
   // Handle buy-in for all players

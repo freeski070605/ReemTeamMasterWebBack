@@ -15,6 +15,9 @@ interface CustomSocket extends Socket {
   tableId?: string; // The table the player is currently in
 }
 
+const ROUND_READY_DURATION_MS = 30000;
+const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
+
 const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: IGameState) => {
   try {
     const humanPlayers = gameState.players.filter(player => !player.isAI);
@@ -118,83 +121,149 @@ const addAIPlayers = async (table: TableDocument, currentPlayers: Array<{ userId
   return updatedPlayers;
 };
 
-// Helper to handle round transition and AI removal
-const handleRoundTransition = async (io: Server, tableId: string) => {
-  setTimeout(async () => {
-    try {
-      let table = await Table.findById(tableId);
-      if (!table) return;
-      const previousGameState = await loadGameState(tableId);
+const clearRoundTransitionTimer = (tableId: string) => {
+  const timer = roundTransitionTimers.get(tableId);
+  if (timer) {
+    clearTimeout(timer);
+    roundTransitionTimers.delete(tableId);
+  }
+};
 
-      const leavingPlayerIds = await redisClient.sMembers(`table:${tableId}:players:leaving`);
-      for (const userId of leavingPlayerIds) {
-        const leavingPlayer = previousGameState?.players.find((player) => player.userId === userId);
-        const fallbackUsername = `Player ${userId.substring(0, 4)}`;
-        await handlePlayerLeave(
-          io,
-          tableId,
-          userId,
-          leavingPlayer?.username ?? fallbackUsername
+const allRoundPlayersReady = (gameState: IGameState): boolean => {
+  const readySet = new Set(gameState.roundReadyPlayerIds ?? []);
+  return gameState.players.every((player) => readySet.has(player.userId));
+};
+
+const executeRoundTransition = async (io: Server, tableId: string) => {
+  const roundLockKey = `lock:round-transition:${tableId}`;
+  const lockAcquired = await redisClient.set(roundLockKey, "locked", {
+    NX: true,
+    EX: 20,
+  });
+
+  if (!lockAcquired) {
+    return;
+  }
+
+  try {
+    clearRoundTransitionTimer(tableId);
+
+    let table = await Table.findById(tableId);
+    if (!table) return;
+    const previousGameState = await loadGameState(tableId);
+    if (!previousGameState || previousGameState.status !== "round-end") {
+      return;
+    }
+
+    const readySet = new Set(previousGameState.roundReadyPlayerIds ?? []);
+    const timeoutRemovalIds = previousGameState.players
+      .filter((player) => !player.isAI && !readySet.has(player.userId))
+      .map((player) => player.userId);
+
+    const leavingPlayerIds = await redisClient.sMembers(`table:${tableId}:players:leaving`);
+    const removeIds = [...new Set([...leavingPlayerIds, ...timeoutRemovalIds])];
+    for (const userId of removeIds) {
+      const leavingPlayer = previousGameState.players.find((player) => player.userId === userId);
+      const fallbackUsername = `Player ${userId.substring(0, 4)}`;
+      await handlePlayerLeave(
+        io,
+        tableId,
+        userId,
+        leavingPlayer?.username ?? fallbackUsername
+      );
+    }
+    await redisClient.del(`table:${tableId}:players:leaving`);
+
+    table = await Table.findById(tableId);
+    if (!table) return;
+
+    let playersWithDetails = await buildPlayersWithUsernames(table, tableId);
+    const humans = playersWithDetails.filter((p) => !p.isAI);
+    const ais = playersWithDetails.filter((p) => p.isAI);
+
+    if (humans.length >= table.minPlayers && ais.length > 0) {
+      playersWithDetails = humans;
+      table.players = humans.map((h) => ({ userId: new mongoose.Types.ObjectId(h.userId), isAI: false })) as any;
+      table.currentPlayerCount = humans.length;
+
+      for (const ai of ais) {
+        await redisClient.hDel(`table:${tableId}:players`, ai.userId);
+      }
+      await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
+      await table.save();
+    }
+
+    // Keep games running by backfilling AI seats up to min players when humans remain.
+    if (table.currentPlayerCount < table.minPlayers && humans.length > 0) {
+      const aiToAdd = table.minPlayers - table.currentPlayerCount;
+      for (let i = 0; i < aiToAdd; i++) {
+        const aiUserId = new mongoose.Types.ObjectId().toString();
+        const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
+        table.players.push({ userId: new mongoose.Types.ObjectId(aiUserId), isAI: true } as any);
+        table.currentPlayerCount++;
+        await redisClient.hSet(
+          `table:${tableId}:players`,
+          aiUserId,
+          JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null })
         );
       }
-      await redisClient.del(`table:${tableId}:players:leaving`);
-
-      table = await Table.findById(tableId);
-      if (!table) return;
-      if (table.currentPlayerCount < table.minPlayers || table.players.length === 0) {
-        table.status = "waiting";
-        table.currentMatchId = undefined;
-        await table.save();
-        io.to(tableId).emit("tableUpdate", { message: "Waiting for players to start the next round.", table });
-        return;
-      }
-
-      // Rebuild players from table order so dealer rotation remains clockwise and stable.
-      let playersWithDetails = await buildPlayersWithUsernames(table, tableId);
-
-      // Filter: Humans vs AIs
-      const humans = playersWithDetails.filter(p => !p.isAI);
-      const ais = playersWithDetails.filter(p => p.isAI);
-
-      let nextGamePlayers = [...playersWithDetails];
-
-      // If we have enough humans to replace AI
-      // And we actually HAVE AIs to remove (otherwise no need to change anything)
-      if (humans.length >= table.minPlayers && ais.length > 0) {
-          // Keep only humans
-          nextGamePlayers = humans;
-          
-          // Update MongoDB
-          // Note: table.players schema has userId and isAI.
-          table.players = humans.map(h => ({ userId: new mongoose.Types.ObjectId(h.userId), isAI: false })) as any;
-          table.currentPlayerCount = humans.length;
-          
-          // Remove AIs from Redis
-          for (const ai of ais) {
-             await redisClient.hDel(`table:${tableId}:players`, ai.userId);
-          }
-          await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
-          await table.save();
-      }
-
-      // Start new game
-      const nextDealerIndex = previousGameState
-        ? (previousGameState.currentDealerIndex + 1) % Math.max(1, nextGamePlayers.length)
-        : 0;
-
-      const newGameState = await initializeGame(table, nextGamePlayers, { dealerIndex: nextDealerIndex });
-      await saveGameState(newGameState);
-      
-      io.to(tableId).emit("tableUpdate", { message: "Starting new round...", table, gameState: newGameState });
-      io.to(tableId).emit("initialGameState", newGameState);
-      if (newGameState.players[newGameState.currentPlayerIndex]?.isAI) {
-        handleAITurn(io, tableId);
-      }
-
-    } catch (e) {
-      console.error("Error in round transition:", e);
+      await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
+      await table.save();
+      playersWithDetails = await buildPlayersWithUsernames(table, tableId);
     }
-  }, 30000); // 30 second delay
+
+    if (table.currentPlayerCount < table.minPlayers || table.players.length === 0) {
+      table.status = "waiting";
+      table.currentMatchId = undefined;
+      await table.save();
+      io.to(tableId).emit("tableUpdate", { message: "Waiting for players to start the next round.", table });
+      return;
+    }
+
+    const nextDealerIndex =
+      (previousGameState.currentDealerIndex + 1) % Math.max(1, playersWithDetails.length);
+    const newGameState = await initializeGame(table, playersWithDetails, { dealerIndex: nextDealerIndex });
+    await saveGameState(newGameState);
+
+    io.to(tableId).emit("tableUpdate", { message: "Starting new round...", table, gameState: newGameState });
+    io.to(tableId).emit("initialGameState", newGameState);
+    io.to(tableId).emit("gameStateUpdate", newGameState);
+
+    if (newGameState.players[newGameState.currentPlayerIndex]?.isAI) {
+      handleAITurn(io, tableId);
+    }
+  } catch (e) {
+    console.error("Error in round transition:", e);
+  } finally {
+    await redisClient.del(roundLockKey);
+  }
+};
+
+const beginRoundReadyPhase = async (io: Server, tableId: string, gameState: IGameState) => {
+  if (gameState.status !== "round-end") {
+    return;
+  }
+
+  clearRoundTransitionTimer(tableId);
+
+  const aiReadyIds = gameState.players.filter((player) => player.isAI).map((player) => player.userId);
+  const updatedGameState: IGameState = {
+    ...gameState,
+    roundReadyPlayerIds: aiReadyIds,
+    roundReadyDeadline: Date.now() + ROUND_READY_DURATION_MS,
+  };
+
+  await saveGameState(updatedGameState);
+  io.to(tableId).emit("gameStateUpdate", updatedGameState);
+
+  const timer = setTimeout(() => {
+    void executeRoundTransition(io, tableId);
+  }, ROUND_READY_DURATION_MS);
+  roundTransitionTimers.set(tableId, timer);
+
+  if (allRoundPlayersReady(updatedGameState)) {
+    await executeRoundTransition(io, tableId);
+  }
 };
 
 // Helper to handle AI turns
@@ -232,7 +301,7 @@ const handleAITurn = async (io: Server, tableId: string) => {
 
            if (updatedGameState.status === 'round-end') {
               await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-              handleRoundTransition(io, tableId);
+              await beginRoundReadyPhase(io, tableId, updatedGameState);
               return;
            }
            
@@ -248,7 +317,7 @@ const handleAITurn = async (io: Server, tableId: string) => {
 
                if (updatedGameState.status === 'round-end') {
                   await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-                  handleRoundTransition(io, tableId);
+                  await beginRoundReadyPhase(io, tableId, updatedGameState);
                   return;
                }
                
@@ -265,7 +334,7 @@ const handleAITurn = async (io: Server, tableId: string) => {
                    await saveGameState(updatedGameState);
                    io.to(tableId).emit("gameStateUpdate", updatedGameState);
                    await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-                   handleRoundTransition(io, tableId);
+                   await beginRoundReadyPhase(io, tableId, updatedGameState);
                    return;
                }
                await saveGameState(updatedGameState);
@@ -279,7 +348,7 @@ const handleAITurn = async (io: Server, tableId: string) => {
             await saveGameState(updatedGameState);
             io.to(tableId).emit("gameStateUpdate", updatedGameState);
             await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-            handleRoundTransition(io, tableId);
+            await beginRoundReadyPhase(io, tableId, updatedGameState);
             return;
         }
 
@@ -573,6 +642,32 @@ const setupSocketHandlers = (io: Server) => {
       socket.emit("ackLeaveRequest");
     });
 
+    socket.on("putIn", async ({ tableId, userId }: { tableId: string; userId: string }) => {
+      const gameState = await loadGameState(tableId);
+      if (!gameState || gameState.status !== "round-end") {
+        return socket.emit("gameError", { message: "Put In is only available between rounds." });
+      }
+
+      const player = gameState.players.find((p) => p.userId === userId);
+      if (!player) {
+        return socket.emit("gameError", { message: "Player not found for this round." });
+      }
+
+      const readySet = new Set(gameState.roundReadyPlayerIds ?? []);
+      readySet.add(userId);
+      const updatedGameState: IGameState = {
+        ...gameState,
+        roundReadyPlayerIds: Array.from(readySet),
+      };
+
+      await saveGameState(updatedGameState);
+      io.to(tableId).emit("gameStateUpdate", updatedGameState);
+
+      if (allRoundPlayersReady(updatedGameState)) {
+        await executeRoundTransition(io, tableId);
+      }
+    });
+
     // Event: Player draws a card
     socket.on("drawCard", async ({ tableId, userId, source }: { tableId: string; userId: string; source: 'deck' | 'discard' }) => {
       console.log(`User ${userId} drew a card from ${source} in table ${tableId}`);
@@ -586,7 +681,7 @@ const setupSocketHandlers = (io: Server) => {
           if (updatedGameState.status === "round-end") {
              await emitWalletBalanceUpdates(io, tableId, updatedGameState);
              console.log(`Round ended (Deck Empty) in table ${tableId}`);
-             handleRoundTransition(io, tableId);
+             await beginRoundReadyPhase(io, tableId, updatedGameState);
              return;
           }
 
@@ -608,7 +703,7 @@ const setupSocketHandlers = (io: Server) => {
 
           if (updatedGameState.status === "round-end") {
             await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-            handleRoundTransition(io, tableId);
+            await beginRoundReadyPhase(io, tableId, updatedGameState);
             return;
           }
           
@@ -641,7 +736,7 @@ const setupSocketHandlers = (io: Server) => {
             // Handle Reem case - round ends instantly
             console.log(`Player ${userId} Reemed! Round ends.`);
             await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-            handleRoundTransition(io, tableId);
+            await beginRoundReadyPhase(io, tableId, updatedGameState);
           } else {
             // If not Reem, proceed to discard or next turn logic
             // For Tonk, usually after spreading, you must discard one card.
@@ -682,7 +777,7 @@ const setupSocketHandlers = (io: Server) => {
           // Round ends after a drop. Payouts will be calculated.
           console.log(`Player ${userId} dropped. Round ends.`);
           await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-          handleRoundTransition(io, tableId);
+          await beginRoundReadyPhase(io, tableId, updatedGameState);
         } catch (error: any) {
           socket.emit("gameError", { message: error.message });
         }

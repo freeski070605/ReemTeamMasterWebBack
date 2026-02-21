@@ -35,6 +35,9 @@ router.post('/register', async (req: Request, res: Response) => {
     // Create a new wallet for the user
     const wallet = new Wallet({
       userId: user._id,
+      usdBalance: 0,
+      rtcBalance: 1000,
+      lastRtcRefill: new Date(),
       availableBalance: 0,
       pendingWithdrawals: 0,
       lifetimeDeposits: 0,
@@ -188,6 +191,9 @@ router.post('/facebook/token', async (req: Request, res: Response) => {
 
       const wallet = new Wallet({
         userId: user._id,
+        usdBalance: 0,
+        rtcBalance: 1000,
+        lastRtcRefill: new Date(),
         availableBalance: 0,
         pendingWithdrawals: 0,
         lifetimeDeposits: 0,

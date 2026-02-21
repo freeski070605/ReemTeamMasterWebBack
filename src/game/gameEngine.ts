@@ -1,14 +1,32 @@
 import { Card, createDeck, shuffleDeck, dealCards, CardRank, CardSuit } from './deck';
 import { redisClient } from '../config/redis';
 import Table, { TableDocument } from '../models/Table';
-import Wallet from '../models/Wallet'; // Import Wallet
-import Match from '../models/Match'; // Import Match
-import Transaction from '../models/Transaction'; // Import Transaction
-import mongoose from 'mongoose';
+import { DEFAULT_GAME_MODE, GameMode } from '../domain/gameMode';
+
+export type RoundEndType = 'REGULAR' | 'REEM' | 'AUTO_TRIPLE' | 'CAUGHT_DROP' | 'DECK_EMPTY';
+export type PlacementWinType = RoundEndType | 'LOSS';
+
+export interface IPlacement {
+  userId: string;
+  rank: number;
+  winType: PlacementWinType;
+}
+
+export interface IEngineRoundResult {
+  sessionId: string;
+  mode: GameMode;
+  placements: Array<{
+    userId: string;
+    rank: number;
+    winType: PlacementWinType;
+  }>;
+}
 
 // Represents the live state of a game table in Redis
 export interface IGameState {
   tableId: string;
+  mode?: GameMode;
+  contestId?: string | null;
   currentDealerIndex: number;
   players: Array<{
     userId: string;
@@ -33,12 +51,18 @@ export interface IGameState {
   roundWins: { [userId: string]: number };
   pot: number; // The total pot for the current round
   lockedAntes: { [userId: string]: number };
-  roundEndedBy: 'REGULAR' | 'REEM' | 'AUTO_TRIPLE' | 'CAUGHT_DROP' | 'DECK_EMPTY' | null; // How the round ended
+  roundEndedBy: RoundEndType | null; // How the round ended
   roundWinnerId?: string;
   roundLoserId?: string;
   caughtDroppingPlayerId?: string; // If a player was caught dropping
   handScores?: { [userId: string]: number }; // Stores final hand scores for all players at round end
+  placements?: IPlacement[];
   payouts?: { [userId: string]: number };
+  roundEntryApplied?: boolean;
+  roundSettlementStatus?: 'pending' | 'settled' | 'failed';
+  roundSettlementError?: string | null;
+  roundSettledAt?: number | null;
+  roundSettlementReference?: string | null;
   roundReadyPlayerIds?: string[];
   roundReadyDeadline?: number | null;
   // Other game state properties
@@ -111,212 +135,98 @@ export const checkForAutomaticWins = (players: Array<{ userId: string; hand: Car
 
 /**
  * Handles the buy-in for all players in a round.
- * Deducts the stake from each human player's wallet.
+ * This only updates in-memory game-state ante/pot metadata.
  * @param gameState The current game state.
- * @returns The updated game state with buy-ins recorded and updated currentPot.
+ * @returns The updated game state with round entry values initialized.
  */
 export const handleBuyIn = async (gameState: IGameState): Promise<IGameState> => {
-  let updatedPot = gameState.pot;
-  const updatedLockedAntes = { ...gameState.lockedAntes };
-  const updatedPlayers = await Promise.all(gameState.players.map(async (player) => {
-    // For all players (including AI for pot calculation), lock the ante
+  let updatedPot = 0;
+  const updatedLockedAntes: { [userId: string]: number } = {};
+  const updatedPlayers = gameState.players.map((player) => {
+    // Keep gameplay state deterministic; economy settlement happens outside the engine.
     updatedPot += gameState.baseStake;
     updatedLockedAntes[player.userId] = gameState.baseStake;
-
-    if (!player.isAI) {
-      const playerWallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(player.userId) });
-      
-      if (!playerWallet) {
-        // This should ideally not happen if players are validated before joining
-        throw new Error(`Wallet not found for player ${player.username}.`);
-      }
-
-      // Validate if player can cover the ante
-      if (playerWallet.availableBalance < gameState.baseStake) {
-        throw new Error(`Player ${player.username} has insufficient funds for the ante.`);
-      }
-
-      // Deduct ante immediately so round-end reflects the stake loss.
-      playerWallet.availableBalance -= gameState.baseStake;
-      await playerWallet.save();
-    }
     
     return { ...player, currentBuyIn: gameState.baseStake };
-  }));
+  });
 
-  return { ...gameState, players: updatedPlayers, pot: updatedPot, lockedAntes: updatedLockedAntes };
+  return {
+    ...gameState,
+    players: updatedPlayers,
+    pot: updatedPot,
+    lockedAntes: updatedLockedAntes,
+    roundEntryApplied: false,
+    roundSettlementStatus: undefined,
+    roundSettlementError: null,
+    roundSettledAt: null,
+    roundSettlementReference: null,
+  };
 };
 
-/**
- * Handles payouts at the end of a round.
- * Updates player wallets and match history in MongoDB.
- * @param gameState The final game state of the round.
- * @returns The updated game state after payouts.
- */
-export const handleRoundEndPayouts = async (gameState: IGameState): Promise<IGameState> => {
+export const buildPlacements = (gameState: IGameState): IPlacement[] => {
+  const handScores = gameState.handScores ?? calculateAllHandScores(gameState.players);
+  const winnerId = gameState.roundWinnerId;
+
+  const ranked = [...gameState.players].sort((a, b) => {
+    if (winnerId && a.userId === winnerId) return -1;
+    if (winnerId && b.userId === winnerId) return 1;
+    const scoreA = handScores[a.userId] ?? calculateHandValue(a.hand);
+    const scoreB = handScores[b.userId] ?? calculateHandValue(b.hand);
+    return scoreA - scoreB;
+  });
+
+  return ranked.map((player, index) => ({
+    userId: player.userId,
+    rank: index + 1,
+    winType: player.userId === winnerId
+      ? ((gameState.roundEndedBy ?? 'REGULAR') as RoundEndType)
+      : 'LOSS',
+  }));
+};
+
+export const finalizeRoundState = (gameState: IGameState): IGameState => {
   if (gameState.status !== 'round-end') {
     return gameState;
   }
 
-  const payoutData = calculatePayouts(gameState);
-  await settleWallets(gameState, payoutData);
-  const baseLosses: { [userId: string]: number } = {};
-  for (const player of gameState.players) {
-    if (player.userId !== gameState.roundWinnerId) {
-      baseLosses[player.userId] = gameState.baseStake;
-    }
-  }
+  const handScores = gameState.handScores ?? calculateAllHandScores(gameState.players);
+  const placements = gameState.placements ?? buildPlacements({ ...gameState, handScores });
+  const existingSettlementStatus = gameState.roundSettlementStatus;
 
-  const updatedGameState = {
+  return {
     ...gameState,
-    payouts: {
-      [gameState.roundWinnerId!]: payoutData.winnerPayout,
-      ...Object.entries(baseLosses).reduce((acc, [playerId, amount]) => {
-        acc[playerId] = -amount;
-        return acc;
-      }, {} as { [userId: string]: number }),
-      ...payoutData.penalties.reduce((acc, p) => {
-        const existing = acc[p.playerId] ?? 0;
-        acc[p.playerId] = existing - p.amount;
-        return acc;
-      }, {} as { [userId: string]: number }),
-    },
+    handScores,
+    placements,
+    roundSettlementStatus: existingSettlementStatus ?? 'pending',
+    roundSettlementError: gameState.roundSettlementError ?? null,
+    roundSettledAt: gameState.roundSettledAt ?? null,
+    roundSettlementReference: gameState.roundSettlementReference ?? null,
   };
-  
-  return updatedGameState;
 };
 
-export const calculatePayouts = (gameState: IGameState): { winnerPayout: number; penalties: { playerId: string; amount: number }[] } => {
-  const { pot, baseStake, roundEndedBy, roundWinnerId, caughtDroppingPlayerId, players } = gameState;
-  let winnerPayout = 0;
-  const penalties: { playerId: string; amount: number }[] = [];
-  const losers = players.filter(p => p.userId !== roundWinnerId);
-
-  if (!roundWinnerId) {
-    return { winnerPayout: 0, penalties: [] };
+export const toEngineRoundResult = (gameState: IGameState): IEngineRoundResult | null => {
+  if (gameState.status !== 'round-end') {
+    return null;
   }
 
-  switch (roundEndedBy) {
-    case 'REGULAR':
-    case 'DECK_EMPTY':
-      winnerPayout = pot;
-      break;
-    case 'REEM':
-      winnerPayout = pot + (baseStake * losers.length);
-      losers.forEach(loser => {
-        penalties.push({ playerId: loser.userId, amount: baseStake });
-      });
-      break;
-    case 'AUTO_TRIPLE':
-      const penaltyAmount = baseStake * 3;
-      winnerPayout = pot + (penaltyAmount * losers.length);
-      losers.forEach(loser => {
-        penalties.push({ playerId: loser.userId, amount: penaltyAmount });
-      });
-      break;
-    case 'CAUGHT_DROP':
-      if (caughtDroppingPlayerId) {
-        winnerPayout = pot + baseStake;
-        penalties.push({ playerId: caughtDroppingPlayerId, amount: baseStake });
-      }
-      break;
+  const finalized = finalizeRoundState(gameState);
+  const placements = finalized.placements ?? [];
+  if (placements.length === 0) {
+    return null;
   }
 
-  return { winnerPayout, penalties };
-};
-
-const settleWallets = async (gameState: IGameState, payoutData: { winnerPayout: number; penalties: { playerId: string; amount: number }[] }) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const { tableId, roundWinnerId, players, pot, roundEndedBy } = gameState;
-    const { winnerPayout, penalties } = payoutData;
-
-    if (!roundWinnerId) {
-      throw new Error("Cannot settle wallets without a winner.");
-    }
-    
-    // Credit winner
-    const winnerWallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(roundWinnerId) }).session(session);
-    if (winnerWallet) {
-      winnerWallet.availableBalance += winnerPayout;
-      // Also record in earnings history, if you keep this separate
-      winnerWallet.matchEarningsHistory.push({ matchId: new mongoose.Types.ObjectId(), amount: winnerPayout, date: new Date() });
-      await winnerWallet.save({ session });
-
-      // Create transaction for winner
-      const winTransaction = new Transaction({
-        userId: new mongoose.Types.ObjectId(roundWinnerId),
-        type: 'Win',
-        amount: winnerPayout,
-        status: 'Completed',
-        details: { matchId: new mongoose.Types.ObjectId() } // This should be the actual matchId once it's created
-      });
-      await winTransaction.save({ session });
-    }
-
-    // Debit penalized players
-    for (const penalty of penalties) {
-      const loserWallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(penalty.playerId) }).session(session);
-      if (loserWallet) {
-        loserWallet.availableBalance -= penalty.amount;
-        if (loserWallet.availableBalance < 0) {
-          // This should be prevented by pre-game validation
-          throw new Error(`Player ${penalty.playerId} has insufficient funds to cover penalty.`);
-        }
-        loserWallet.matchEarningsHistory.push({ matchId: new mongoose.Types.ObjectId(), amount: -penalty.amount, date: new Date() });
-        await loserWallet.save({ session });
-
-        // Create transaction for loser
-        const lossTransaction = new Transaction({
-            userId: new mongoose.Types.ObjectId(penalty.playerId),
-            type: 'Loss',
-            amount: -penalty.amount,
-            status: 'Completed',
-            details: { matchId: new mongoose.Types.ObjectId() } // This should be the actual matchId once it's created
-        });
-        await lossTransaction.save({ session });
-      }
-    }
-
-    // Create match record
-    const match = new Match({
-      tableId,
-      players: players.map(p => ({
-        userId: p.userId,
-        username: p.username,
-        stake: gameState.baseStake,
-        buyIn: p.currentBuyIn,
-        payout: p.userId === roundWinnerId
-          ? winnerPayout
-          : -gameState.baseStake - (penalties.find(pen => pen.playerId === p.userId)?.amount || 0),
-        isAI: p.isAI,
-        finalHandValue: gameState.handScores ? gameState.handScores[p.userId] : 0,
-      })),
-      winner: roundWinnerId,
-      winType: roundEndedBy,
-      pot,
-      winnerPayout,
-      penalties,
-      status: 'completed',
-    });
-    await match.save({ session });
-
-    // Now that the match is saved, we can update the transactions with the correct matchId
-    await Transaction.updateMany(
-        { "details.matchId": new mongoose.Types.ObjectId() }, // Temporary matchId
-        { "details.matchId": match._id },
-        { session }
-    );
-
-    await session.commitTransaction();
-  } catch (error) {
-    await session.abortTransaction();
-    console.error("Wallet settlement transaction failed:", error);
-    throw error;
-  } finally {
-    session.endSession();
-  }
+  return {
+    sessionId:
+      finalized.contestId ??
+      finalized.roundSettlementReference ??
+      `${finalized.tableId}:${finalized.turn}`,
+    mode: finalized.mode ?? DEFAULT_GAME_MODE,
+    placements: placements.map((placement) => ({
+      userId: placement.userId,
+      rank: placement.rank,
+      winType: placement.winType,
+    })),
+  };
 };
 
 /**
@@ -355,6 +265,8 @@ export const initializeGame = async (
 
   let initialGameState: IGameState = {
     tableId: table._id.toString(),
+    mode: table.mode,
+    contestId: table.activeContestId ?? null,
     currentDealerIndex: dealerIndex, // Rotates clockwise between rounds
     players: initialPlayersState,
     deck: remainingDeck,
@@ -391,8 +303,7 @@ export const initializeGame = async (
         roundWinnerId: autoWinResult.winnerId,
         handScores: calculateAllHandScores(initialGameState.players),
       };
-      // Handle payouts for auto-win
-      return await handleRoundEndPayouts(finalGameState);
+      return finalizeRoundState(finalGameState);
     }
   }
 
@@ -485,7 +396,7 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
         handScores: calculateAllHandScores(gameState.players),
     };
     
-    return await handleRoundEndPayouts(updatedGameState);
+    return finalizeRoundState(updatedGameState);
   }
 
   newHand.push(drawnCard);
@@ -556,7 +467,7 @@ export const playerDiscardCard = async (gameState: IGameState, userId: string, c
       roundWinnerId: userId,
       handScores: calculateAllHandScores(updatedGameState.players),
     };
-    return await handleRoundEndPayouts(roundEndState);
+    return finalizeRoundState(roundEndState);
   }
 
   return updatedGameState;
@@ -683,8 +594,7 @@ export const playerSpreadCards = async (gameState: IGameState, userId: string, c
       roundWinnerId: userId,
       handScores: calculateAllHandScores(updatedGameState.players),
     };
-    // Handle payouts for Reem
-    updatedGameState = await handleRoundEndPayouts(updatedGameState); // Await payouts
+    updatedGameState = finalizeRoundState(updatedGameState);
   }
 
   return updatedGameState;
@@ -840,6 +750,6 @@ export const playerDrop = async (gameState: IGameState, userId: string): Promise
   };
 
   // TODO: Implement logic for caught dropping. For now, assume not caught.
-  updatedGameState = await handleRoundEndPayouts(updatedGameState); // Await payouts
+  updatedGameState = finalizeRoundState(updatedGameState);
   return updatedGameState;
 };

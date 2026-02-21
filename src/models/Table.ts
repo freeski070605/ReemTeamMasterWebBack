@@ -1,4 +1,5 @@
 import { Schema, model, Types, HydratedDocument, InferSchemaType } from 'mongoose';
+import { DEFAULT_GAME_MODE, GameMode } from '../domain/gameMode';
 
 interface ITablePlayer {
   userId: Types.ObjectId;
@@ -20,6 +21,12 @@ const tableSchema = new Schema({
   stake: {
     type: Number,
     required: true,
+  },
+  mode: {
+    type: String,
+    enum: Object.values(GameMode),
+    required: true,
+    default: DEFAULT_GAME_MODE,
   },
   minPlayers: {
     type: Number,
@@ -50,6 +57,11 @@ const tableSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: 'Match',
   },
+  activeContestId: {
+    type: String,
+    trim: true,
+    index: true,
+  },
 }, {
   timestamps: true,
 });
@@ -57,12 +69,14 @@ const tableSchema = new Schema({
 export interface ITable {
   name: string;
   stake: number;
+  mode: GameMode;
   minPlayers: number;
   maxPlayers: number;
   currentPlayerCount: number;
   players: ITablePlayer[];
   status: 'waiting' | 'in-game';
   currentMatchId?: Types.ObjectId;
+  activeContestId?: string;
   createdAt: Date;
   updatedAt: Date;
 }

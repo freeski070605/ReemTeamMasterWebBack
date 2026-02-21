@@ -1,9 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { SquareClient, SquareEnvironment } from 'square';
 import dotenv from 'dotenv';
-import Wallet from '../models/Wallet';
 import Transaction from '../models/Transaction';
 import mongoose from 'mongoose';
+import { FinancialService } from '../services/financialService';
 
 dotenv.config();
 
@@ -54,31 +54,28 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
 
     try {
       const userObjectId = new mongoose.Types.ObjectId(userIdFromMetadata);
-      const wallet = await Wallet.findOne({ userId: userObjectId });
+      await FinancialService.deposit(userIdFromMetadata, amount, {
+        referenceType: 'square_payment',
+        referenceId: payment.id,
+        metadata: {
+          orderId,
+          currency: amountMoney.currency,
+        },
+      });
 
-      if (wallet) {
-        wallet.availableBalance += amount;
-        wallet.lifetimeDeposits += amount;
-        // Add to matchEarningsHistory if this was a direct deposit into a match
-        // For now, assuming general deposit
-        await wallet.save();
+      // Keep legacy transaction history until ledger UI cutover is complete.
+      const transaction = new Transaction({
+        userId: userObjectId,
+        type: 'Deposit',
+        amount: amount,
+        status: 'Completed',
+        details: {
+          paymentId: payment.id,
+        },
+      });
+      await transaction.save();
 
-        // Create a new transaction
-        const transaction = new Transaction({
-          userId: userObjectId,
-          type: 'Deposit',
-          amount: amount,
-          status: 'Completed',
-          details: {
-            paymentId: payment.id,
-          },
-        });
-        await transaction.save();
-
-        console.log(`Wallet for user ${userIdFromMetadata} credited with ${amount} ${amountMoney.currency}.`);
-      } else {
-        console.error(`Square Webhook: Wallet not found for user ID: ${userIdFromMetadata}.`);
-      }
+      console.log(`Wallet for user ${userIdFromMetadata} credited with ${amount} ${amountMoney.currency}.`);
     } catch (dbError: unknown) { // Explicitly type dbError as unknown
       console.error('Square Webhook: Database error updating wallet:', dbError);
       return res.status(500).json({ message: 'Internal server error during wallet update.' });

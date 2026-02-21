@@ -13,6 +13,24 @@ const walletSchema = new Schema({
     required: true,
     unique: true,
   },
+  usdBalance: {
+    type: Number,
+    required: true,
+    default: 0,
+    min: 0,
+  },
+  rtcBalance: {
+    type: Number,
+    required: true,
+    default: 0,
+    min: 0,
+  },
+  lastRtcRefill: {
+    type: Date,
+    required: true,
+    default: Date.now,
+  },
+  // Deprecated compatibility field. Existing runtime still reads/writes this until cutover.
   availableBalance: {
     type: Number,
     required: true,
@@ -39,6 +57,19 @@ const walletSchema = new Schema({
   },
 }, {
   timestamps: true,
+});
+
+walletSchema.pre('save', function syncLegacyUsdBalance() {
+  const wallet = this as any;
+  const usdChanged = wallet.isModified('usdBalance');
+  const legacyChanged = wallet.isModified('availableBalance');
+
+  if (legacyChanged && !usdChanged) {
+    wallet.usdBalance = wallet.availableBalance;
+  } else if (usdChanged && !legacyChanged) {
+    wallet.availableBalance = wallet.usdBalance;
+  }
+
 });
 
 export type IWallet = InferSchemaType<typeof walletSchema>;

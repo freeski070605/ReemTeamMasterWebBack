@@ -1,12 +1,16 @@
 import { Server, Socket } from "socket.io";
-import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, nextTurn, checkReem, IGameState } from "../game/gameEngine";
+import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, nextTurn, IGameState, toEngineRoundResult } from "../game/gameEngine";
 import { getAIPlayerAction } from "../game/aiPlayer"; // Import AI logic
 import Table, { TableDocument } from "../models/Table"; // Import TableDocument
+import Contest, { ContestDocument } from "../models/Contest";
 import User from "../models/User";
 import Wallet from "../models/Wallet";
 import { Card } from "../game/deck";
 import { redisClient } from "../config/redis"; // Import redisClient
-import mongoose, { Document } from "mongoose"; // Import mongoose and Document
+import mongoose from "mongoose";
+import { GameMode } from "../domain/gameMode";
+import { ModeController } from "../services/modeController";
+import { ContestService } from "../services/contestService";
 
 // Define a type for our socket with custom properties
 interface CustomSocket extends Socket {
@@ -18,6 +22,89 @@ interface CustomSocket extends Socket {
 const ROUND_READY_DURATION_MS = 30000;
 const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
 
+const resolveBalanceForMode = (wallet: any | null, mode?: GameMode): number => {
+  if (!wallet) return 0;
+  if (!mode) {
+    return wallet.availableBalance ?? wallet.usdBalance ?? 0;
+  }
+  if (mode === GameMode.USD_CONTEST) {
+    return wallet.usdBalance ?? wallet.availableBalance ?? 0;
+  }
+  return wallet.rtcBalance ?? 0;
+};
+
+const isContinuousMode = (mode?: GameMode): boolean => {
+  return mode === GameMode.FREE_RTC_TABLE || mode === undefined;
+};
+
+const isCompetitionMode = (mode?: GameMode): boolean => {
+  return mode === GameMode.RTC_TOURNAMENT || mode === GameMode.RTC_SATELLITE || mode === GameMode.USD_CONTEST;
+};
+
+const findContestByAnyId = async (contestId: string): Promise<ContestDocument | null> => {
+  const byContestId = await Contest.findOne({ contestId });
+  if (byContestId) {
+    return byContestId;
+  }
+
+  if (mongoose.Types.ObjectId.isValid(contestId)) {
+    return Contest.findById(contestId);
+  }
+
+  return null;
+};
+
+const getContestParticipantIds = (contest: ContestDocument): Set<string> => {
+  return new Set(contest.participants.map((participant) => participant.toString()));
+};
+
+const bindPlayerToUsdContest = async (
+  table: TableDocument,
+  userId: string,
+  requestedContestId?: string
+): Promise<ContestDocument> => {
+  const resolvedContestId = requestedContestId?.trim() || table.activeContestId?.trim();
+  if (!resolvedContestId) {
+    throw new Error("USD_CONTEST tables require a contestId.");
+  }
+
+  let contest = await findContestByAnyId(resolvedContestId);
+  if (!contest) {
+    throw new Error("Contest not found.");
+  }
+
+  if (contest.mode !== GameMode.USD_CONTEST) {
+    throw new Error("Only USD_CONTEST contest sessions can bind to USD_CONTEST tables.");
+  }
+
+  if (contest.entryFee !== table.stake) {
+    throw new Error("Contest entry fee does not match this table stake.");
+  }
+
+  if (table.activeContestId && table.activeContestId !== contest.contestId) {
+    throw new Error("This table is already bound to a different contest.");
+  }
+
+  if (table.currentPlayerCount >= contest.playerCount) {
+    throw new Error("This contest table is full.");
+  }
+
+  const participantIds = getContestParticipantIds(contest);
+  if (!participantIds.has(userId)) {
+    if (contest.status !== "open") {
+      throw new Error(`Contest is not joinable in status "${contest.status}".`);
+    }
+    const joinResult = await ContestService.joinContestWithUsd(contest.contestId, userId);
+    contest = joinResult.contest;
+  }
+
+  if (!getContestParticipantIds(contest).has(userId)) {
+    throw new Error("User is not registered in this contest.");
+  }
+
+  return contest;
+};
+
 const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: IGameState) => {
   try {
     const humanPlayers = gameState.players.filter(player => !player.isAI);
@@ -26,7 +113,10 @@ const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: 
     const balances = await Promise.all(
       humanPlayers.map(async (player) => {
         const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(player.userId) });
-        return { userId: player.userId, balance: wallet?.availableBalance ?? 0 };
+        return {
+          userId: player.userId,
+          balance: resolveBalanceForMode(wallet, gameState.mode),
+        };
       })
     );
 
@@ -36,6 +126,62 @@ const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: 
   } catch (error) {
     console.error("Failed to emit wallet balance updates:", error);
   }
+};
+
+const initializeRoundWithEconomy = async (
+  table: TableDocument,
+  players: Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }>,
+  options?: { dealerIndex?: number }
+): Promise<IGameState> => {
+  const initializedState = await initializeGame(table, players, options);
+  return ModeController.applyRoundEntryEconomy(initializedState);
+};
+
+const settleRoundAndBroadcast = async (
+  io: Server,
+  tableId: string,
+  gameState: IGameState
+): Promise<IGameState> => {
+  const settledState = await ModeController.settleRound(gameState);
+  await saveGameState(settledState);
+  io.to(tableId).emit("gameStateUpdate", settledState);
+  const roundResult = toEngineRoundResult(settledState);
+  if (roundResult) {
+    io.to(tableId).emit("roundResult", roundResult);
+  }
+
+  if (settledState.roundSettlementStatus !== 'settled') {
+    if (settledState.roundSettlementStatus === 'failed') {
+      io.to(tableId).emit("gameError", {
+        message: settledState.roundSettlementError ?? "Round settlement failed.",
+      });
+    }
+    return settledState;
+  }
+
+  await emitWalletBalanceUpdates(io, tableId, settledState);
+  if (isContinuousMode(settledState.mode)) {
+    await beginRoundReadyPhase(io, tableId, settledState);
+    return settledState;
+  }
+
+  const table = await Table.findById(tableId);
+  if (table) {
+    table.status = "waiting";
+    table.currentMatchId = undefined;
+    if (table.mode === GameMode.USD_CONTEST) {
+      table.activeContestId = undefined;
+    }
+    await table.save();
+    await redisClient.del(`table:${tableId}:players:leaving`);
+    io.to(tableId).emit("tableUpdate", {
+      message: "Competition match complete. Table is now waiting for a new session.",
+      table,
+      gameState: settledState,
+    });
+  }
+
+  return settledState;
 };
 
 const buildPlayersWithUsernames = async (
@@ -150,8 +296,24 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
 
     let table = await Table.findById(tableId);
     if (!table) return;
+    const tableMode = table.mode as GameMode;
     const previousGameState = await loadGameState(tableId);
     if (!previousGameState || previousGameState.status !== "round-end") {
+      return;
+    }
+
+    if (!isContinuousMode(tableMode)) {
+      table.status = "waiting";
+      table.currentMatchId = undefined;
+      if (table.mode === GameMode.USD_CONTEST) {
+        table.activeContestId = undefined;
+      }
+      await table.save();
+      io.to(tableId).emit("tableUpdate", {
+        message: "Competition session is complete. Start a new session to continue.",
+        table,
+        gameState: previousGameState,
+      });
       return;
     }
 
@@ -222,12 +384,16 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
 
     const nextDealerIndex =
       (previousGameState.currentDealerIndex + 1) % Math.max(1, playersWithDetails.length);
-    const newGameState = await initializeGame(table, playersWithDetails, { dealerIndex: nextDealerIndex });
+    const newGameState = await initializeRoundWithEconomy(table, playersWithDetails, { dealerIndex: nextDealerIndex });
     await saveGameState(newGameState);
 
     io.to(tableId).emit("tableUpdate", { message: "Starting new round...", table, gameState: newGameState });
     io.to(tableId).emit("initialGameState", newGameState);
     io.to(tableId).emit("gameStateUpdate", newGameState);
+    const roundResult = toEngineRoundResult(newGameState);
+    if (roundResult) {
+      io.to(tableId).emit("roundResult", roundResult);
+    }
 
     if (newGameState.players[newGameState.currentPlayerIndex]?.isAI) {
       handleAITurn(io, tableId);
@@ -296,14 +462,13 @@ const handleAITurn = async (io: Server, tableId: string) => {
 
         if (aiAction.type === 'draw') {
            updatedGameState = await playerDrawCard(updatedGameState, currentPlayer.userId);
-           await saveGameState(updatedGameState);
-           io.to(tableId).emit("gameStateUpdate", updatedGameState);
-
            if (updatedGameState.status === 'round-end') {
-              await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-              await beginRoundReadyPhase(io, tableId, updatedGameState);
+              await settleRoundAndBroadcast(io, tableId, updatedGameState);
               return;
            }
+
+           await saveGameState(updatedGameState);
+           io.to(tableId).emit("gameStateUpdate", updatedGameState);
            
            // AI continues turn after drawing
            handleAITurn(io, tableId);
@@ -312,15 +477,15 @@ const handleAITurn = async (io: Server, tableId: string) => {
         } else if (aiAction.type === 'discard') {
            if (aiAction.payload?.card) {
                updatedGameState = await playerDiscardCard(updatedGameState, currentPlayer.userId, aiAction.payload.card);
-               await saveGameState(updatedGameState);
-               io.to(tableId).emit("gameStateUpdate", updatedGameState);
 
                if (updatedGameState.status === 'round-end') {
-                  await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-                  await beginRoundReadyPhase(io, tableId, updatedGameState);
+                  await settleRoundAndBroadcast(io, tableId, updatedGameState);
                   return;
                }
-               
+
+               await saveGameState(updatedGameState);
+               io.to(tableId).emit("gameStateUpdate", updatedGameState);
+                
                console.log(`[DEBUG] AI Discard success. Moving to next turn.`);
                const nextGameState = nextTurn(updatedGameState);
                await saveGameState(nextGameState);
@@ -331,10 +496,7 @@ const handleAITurn = async (io: Server, tableId: string) => {
              if (aiAction.payload?.cards) {
                updatedGameState = await playerSpreadCards(updatedGameState, currentPlayer.userId, aiAction.payload.cards);
                if (updatedGameState.status === 'round-end') {
-                   await saveGameState(updatedGameState);
-                   io.to(tableId).emit("gameStateUpdate", updatedGameState);
-                   await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-                   await beginRoundReadyPhase(io, tableId, updatedGameState);
+                   await settleRoundAndBroadcast(io, tableId, updatedGameState);
                    return;
                }
                await saveGameState(updatedGameState);
@@ -345,10 +507,7 @@ const handleAITurn = async (io: Server, tableId: string) => {
              }
         } else if (aiAction.type === 'drop') {
             updatedGameState = await playerDrop(updatedGameState, currentPlayer.userId);
-            await saveGameState(updatedGameState);
-            io.to(tableId).emit("gameStateUpdate", updatedGameState);
-            await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-            await beginRoundReadyPhase(io, tableId, updatedGameState);
+            await settleRoundAndBroadcast(io, tableId, updatedGameState);
             return;
         }
 
@@ -416,6 +575,9 @@ const handlePlayerLeave = async (io: Server, tableId: string, userId: string, us
       table.currentPlayerCount = 0;
       table.status = "waiting";
       table.currentMatchId = undefined;
+      if (table.mode === GameMode.USD_CONTEST) {
+        table.activeContestId = undefined;
+      }
       await table.save();
 
       // Clear all Redis data for this table
@@ -430,6 +592,9 @@ const handlePlayerLeave = async (io: Server, tableId: string, userId: string, us
       table.currentPlayerCount = table.players.length;
       table.status = "waiting"; // Set to waiting if not enough players
       table.currentMatchId = undefined; // Clear current match if game ends
+      if (table.mode === GameMode.USD_CONTEST) {
+        table.activeContestId = undefined;
+      }
       await table.save();
 
       // Remove AI players from Redis occupancy
@@ -474,16 +639,25 @@ const setupSocketHandlers = (io: Server) => {
     console.log(`User connected: ${socket.id}`);
 
     // Event: Player joins a table
-    socket.on("joinTable", async ({ tableId, userId, username, avatarUrl }: { tableId: string; userId: string; username: string; avatarUrl?: string }) => {
+    socket.on("joinTable", async ({
+      tableId,
+      userId,
+      username,
+      avatarUrl,
+      contestId,
+    }: {
+      tableId: string;
+      userId: string;
+      username: string;
+      avatarUrl?: string;
+      contestId?: string;
+    }) => {
       console.log(`User ${username} (${userId}) attempting to join table ${tableId}`);
       let table = await Table.findById(tableId);
       if (!table) {
         return socket.emit("gameError", { message: "Table not found." });
       }
-
-      if (table.currentPlayerCount >= table.maxPlayers) {
-        return socket.emit("gameError", { message: "Table is full." });
-      }
+      const tableMode = table.mode as GameMode;
 
       // Check if player is already in the table
       const existingPlayer = table.players.find(p => p.userId.toString() === userId);
@@ -499,16 +673,56 @@ const setupSocketHandlers = (io: Server) => {
           if (gameState.players[gameState.currentPlayerIndex]?.isAI) {
             handleAITurn(io, tableId);
           }
+          const roundResult = toEngineRoundResult(gameState);
+          if (roundResult) {
+            io.to(socket.id).emit("roundResult", roundResult);
+          }
           return io.to(socket.id).emit("initialGameState", gameState); // Send existing state
         } else {
           return socket.emit("gameError", { message: "No active game state found for this table." });
         }
       }
 
-      // Validate player's balance for new joins only.
-      const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(userId) });
-      if (!wallet || wallet.availableBalance < table.stake * 4) {
-        return socket.emit("gameError", { message: "Insufficient funds to join this table." });
+      const existingGameState = await loadGameState(tableId);
+      if (
+        isCompetitionMode(tableMode) &&
+        table.status === "in-game" &&
+        existingGameState &&
+        existingGameState.status !== "waiting"
+      ) {
+        return socket.emit("gameError", {
+          message: "This competition session is locked. Wait for a new session to start.",
+        });
+      }
+
+      let usdContest: ContestDocument | null = null;
+      if (tableMode === GameMode.USD_CONTEST) {
+        try {
+          usdContest = await bindPlayerToUsdContest(table, userId, contestId);
+          table.activeContestId = usdContest.contestId;
+        } catch (error: any) {
+          return socket.emit("gameError", {
+            message: error?.message || "Unable to join USD contest table.",
+          });
+        }
+
+        if (table.currentPlayerCount >= usdContest.playerCount) {
+          return socket.emit("gameError", { message: "This contest table is full." });
+        }
+      } else if (table.currentPlayerCount >= table.maxPlayers) {
+        return socket.emit("gameError", { message: "Table is full." });
+      }
+
+      // Validate player's balance for new joins only (USD contest joins are validated via ContestService).
+      if (tableMode !== GameMode.USD_CONTEST) {
+        const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(userId) });
+        const requiredEntryBuffer = isContinuousMode(tableMode) ? table.stake * 4 : table.stake;
+        const availableForMode = resolveBalanceForMode(wallet, tableMode);
+        if (!wallet || availableForMode < requiredEntryBuffer) {
+          return socket.emit("gameError", {
+            message: "Insufficient RTC balance to join this table.",
+          });
+        }
       }
 
       // Add player to table in MongoDB
@@ -526,7 +740,7 @@ const setupSocketHandlers = (io: Server) => {
       socket.username = username;
       
       // Check if we need to add an AI to start the game immediately (1 User vs 1 AI)
-      if (table.currentPlayerCount === 1) {
+      if (table.currentPlayerCount === 1 && isContinuousMode(tableMode)) {
           console.log(`Only 1 player in table ${tableId}, adding an AI opponent.`);
           const aiUserId = new mongoose.Types.ObjectId().toString();
           const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
@@ -538,40 +752,79 @@ const setupSocketHandlers = (io: Server) => {
           // Add to Redis
           await redisClient.hSet(`table:${tableId}:players`, aiUserId, JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null }));
           await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
-
-          // Update local players list
       }
 
       let playersInTable = await buildPlayersWithUsernames(table, tableId);
-
-      // Add AI players if not enough human players to start a game
-      if (table.currentPlayerCount < table.minPlayers) {
-        // If not enough human players, wait for more or add AI if a game needs to start.
-        // For now, let's delay AI addition until we hit minPlayers
-      }
+      const requiredPlayersToStart = tableMode === GameMode.USD_CONTEST
+        ? (usdContest?.playerCount ?? table.minPlayers)
+        : table.minPlayers;
       
-      if (table.currentPlayerCount >= table.minPlayers && table.status === "waiting") {
+      if (table.currentPlayerCount >= requiredPlayersToStart && table.status === "waiting") {
+        if (isCompetitionMode(tableMode) && playersInTable.some((player) => player.isAI)) {
+          return socket.emit("gameError", {
+            message: `${tableMode} mode cannot start with AI players.`,
+          });
+        }
+
         table.status = "in-game"; // Set table status to in-game
-        // REMOVED: playersInTable = await addAIPlayers(table, playersInTable); // No longer auto-filling with AI
         
         // Update Redis for any existing AI players (like the one added for 1v1)
-        for(const player of playersInTable) {
+        for (const player of playersInTable) {
           if (player.isAI) {
-             // Check if already in redis? hSet overwrites so it's fine, but we only really need to add the new 1v1 AI if it wasn't there.
-             // The 1v1 AI was added to Redis in the block above (lines 143), so we might not need this loop if we don't add more AIs.
-             // However, for safety/consistency, we can ensure they are in Redis.
-             await redisClient.hSet(`table:${tableId}:players`, player.userId, JSON.stringify({ username: player.username, isAI: true, avatarUrl: null }));
+            await redisClient.hSet(`table:${tableId}:players`, player.userId, JSON.stringify({ username: player.username, isAI: true, avatarUrl: null }));
           }
         }
-        // table.currentPlayerCount is already updated if we added the 1v1 AI.
         await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
 
-        let gameState = await initializeGame(table, playersInTable);
+        let gameState: IGameState;
+        try {
+          if (tableMode === GameMode.USD_CONTEST) {
+            const boundContestId = table.activeContestId;
+            if (!boundContestId) {
+              throw new Error("USD_CONTEST requires a bound contest before session start.");
+            }
+
+            const activeContest = usdContest ?? await findContestByAnyId(boundContestId);
+            if (!activeContest) {
+              throw new Error("Bound contest not found.");
+            }
+
+            const humanPlayers = playersInTable.filter((player) => !player.isAI);
+            if (humanPlayers.length !== activeContest.playerCount) {
+              throw new Error(`Contest requires exactly ${activeContest.playerCount} players to start.`);
+            }
+
+            const participantIds = getContestParticipantIds(activeContest);
+            if (humanPlayers.some((player) => !participantIds.has(player.userId))) {
+              throw new Error("All table players must be registered contest participants.");
+            }
+
+            if (activeContest.status !== "in-progress") {
+              await ContestService.startContest(activeContest.contestId);
+            }
+          }
+
+          gameState = await initializeRoundWithEconomy(table, playersInTable);
+        } catch (error: any) {
+          table.status = "waiting";
+          await table.save();
+          return socket.emit("gameError", {
+            message: error?.message || "Unable to start a new round for this table.",
+          });
+        }
+
         await saveGameState(gameState);
         table.currentMatchId = new mongoose.Types.ObjectId(); // Create a new Match ID for the table
         await table.save();
-        io.to(tableId).emit("tableUpdate", { message: `${username} joined, game starting with AI.`, table, gameState });
+        const startMessage = isContinuousMode(tableMode)
+          ? `${username} joined, game starting with AI.`
+          : `${username} joined, competition session starting.`;
+        io.to(tableId).emit("tableUpdate", { message: startMessage, table, gameState });
         io.to(socket.id).emit("initialGameState", gameState);
+        const roundResult = toEngineRoundResult(gameState);
+        if (roundResult) {
+          io.to(socket.id).emit("roundResult", roundResult);
+        }
         if (gameState.players[gameState.currentPlayerIndex]?.isAI) {
           handleAITurn(io, tableId);
         }
@@ -584,19 +837,19 @@ const setupSocketHandlers = (io: Server) => {
 
       let gameState: IGameState | null = await loadGameState(tableId);
       if (!gameState) {
-        // This block should ideally not be reached if game starts above, but as a fallback
-        // In a real scenario, this would mean starting a game with initial human players, awaiting more.
-        const playersForNewGame = await buildPlayersWithUsernames(table, tableId);
-        gameState = await initializeGame(table, playersForNewGame);
-        // if (gameState) { // Already checked by next if block
-        await saveGameState(gameState);
-        // }
-        table.currentMatchId = undefined; // No match ID until game starts properly
-        await table.save();
+        io.to(tableId).emit("tableUpdate", {
+          message: `${username} joined the table. Waiting for more players.`,
+          table,
+        });
+        return;
       }
 
       io.to(tableId).emit("tableUpdate", { message: `${username} joined the table.`, table, gameState });
       io.to(socket.id).emit("initialGameState", gameState);
+      const roundResult = toEngineRoundResult(gameState);
+      if (roundResult) {
+        io.to(socket.id).emit("roundResult", roundResult);
+      }
       if (gameState.players[gameState.currentPlayerIndex]?.isAI) {
         handleAITurn(io, tableId);
       }
@@ -608,6 +861,9 @@ const setupSocketHandlers = (io: Server) => {
       
       const gameState = await loadGameState(tableId);
       if (gameState && gameState.status === 'in-progress') {
+        if (!isContinuousMode(gameState.mode)) {
+          return socket.emit("gameError", { message: "This competition is locked until the match is complete." });
+        }
         console.log(`Player ${userId} will leave table ${tableId} after the round.`);
         await redisClient.sAdd(`table:${tableId}:players:leaving`, userId);
         socket.emit("ackLeaveRequest");
@@ -627,6 +883,9 @@ const setupSocketHandlers = (io: Server) => {
 
     socket.on("requestLeaveTable", async ({ tableId, userId }: { tableId: string; userId: string }) => {
       const gameState = await loadGameState(tableId);
+      if (gameState && !isContinuousMode(gameState.mode)) {
+        return socket.emit("gameError", { message: "Leave-between-rounds is only available in FREE_RTC_TABLE mode." });
+      }
       if (!gameState || gameState.status !== "in-progress") {
         const table = await Table.findById(tableId);
         const playerInfo = table?.players.find((p) => p.userId.toString() === userId);
@@ -646,6 +905,9 @@ const setupSocketHandlers = (io: Server) => {
       const gameState = await loadGameState(tableId);
       if (!gameState || gameState.status !== "round-end") {
         return socket.emit("gameError", { message: "Put In is only available between rounds." });
+      }
+      if (!isContinuousMode(gameState.mode)) {
+        return socket.emit("gameError", { message: "Put In is only available in FREE_RTC_TABLE mode." });
       }
 
       const player = gameState.players.find((p) => p.userId === userId);
@@ -675,15 +937,14 @@ const setupSocketHandlers = (io: Server) => {
       if (gameState) {
         try {
           const updatedGameState = await playerDrawCard(gameState, userId, source);
-          await saveGameState(updatedGameState);
-          io.to(tableId).emit("gameStateUpdate", updatedGameState);
-
           if (updatedGameState.status === "round-end") {
-             await emitWalletBalanceUpdates(io, tableId, updatedGameState);
+             await settleRoundAndBroadcast(io, tableId, updatedGameState);
              console.log(`Round ended (Deck Empty) in table ${tableId}`);
-             await beginRoundReadyPhase(io, tableId, updatedGameState);
              return;
           }
+
+          await saveGameState(updatedGameState);
+          io.to(tableId).emit("gameStateUpdate", updatedGameState);
 
         } catch (error: any) {
           socket.emit("gameError", { message: error.message });
@@ -698,14 +959,14 @@ const setupSocketHandlers = (io: Server) => {
       if (gameState) {
         try {
           const updatedGameState = await playerDiscardCard(gameState, userId, card);
-          await saveGameState(updatedGameState);
-          io.to(tableId).emit("gameStateUpdate", updatedGameState);
 
           if (updatedGameState.status === "round-end") {
-            await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-            await beginRoundReadyPhase(io, tableId, updatedGameState);
+            await settleRoundAndBroadcast(io, tableId, updatedGameState);
             return;
           }
+
+          await saveGameState(updatedGameState);
+          io.to(tableId).emit("gameStateUpdate", updatedGameState);
           
           // After discarding, it\'s usually the next player\'s turn
           const nextGameState = nextTurn(updatedGameState);
@@ -730,14 +991,13 @@ const setupSocketHandlers = (io: Server) => {
       if (gameState) {
         try {
           const updatedGameState = await playerSpreadCards(gameState, userId, cards);
-          await saveGameState(updatedGameState);
-          io.to(tableId).emit("gameStateUpdate", updatedGameState);
           if (updatedGameState.status === "round-end") {
             // Handle Reem case - round ends instantly
             console.log(`Player ${userId} Reemed! Round ends.`);
-            await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-            await beginRoundReadyPhase(io, tableId, updatedGameState);
+            await settleRoundAndBroadcast(io, tableId, updatedGameState);
           } else {
+            await saveGameState(updatedGameState);
+            io.to(tableId).emit("gameStateUpdate", updatedGameState);
             // If not Reem, proceed to discard or next turn logic
             // For Tonk, usually after spreading, you must discard one card.
             // This logic will be more complex and managed by turn flow.
@@ -772,12 +1032,9 @@ const setupSocketHandlers = (io: Server) => {
       if (gameState) {
         try {
           const updatedGameState = await playerDrop(gameState, userId);
-          await saveGameState(updatedGameState);
-          io.to(tableId).emit("gameStateUpdate", updatedGameState);
-          // Round ends after a drop. Payouts will be calculated.
+          // Round ends after a drop. Settlement is handled by the mode controller.
           console.log(`Player ${userId} dropped. Round ends.`);
-          await emitWalletBalanceUpdates(io, tableId, updatedGameState);
-          await beginRoundReadyPhase(io, tableId, updatedGameState);
+          await settleRoundAndBroadcast(io, tableId, updatedGameState);
         } catch (error: any) {
           socket.emit("gameError", { message: error.message });
         }
@@ -790,6 +1047,10 @@ const setupSocketHandlers = (io: Server) => {
       const gameState = await loadGameState(tableId);
       if (gameState) {
         socket.emit("initialGameState", gameState);
+        const roundResult = toEngineRoundResult(gameState);
+        if (roundResult) {
+          socket.emit("roundResult", roundResult);
+        }
       } else {
         socket.emit("gameError", { message: "No active game state found for this table." });
       }

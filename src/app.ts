@@ -6,6 +6,9 @@ import webhookRoutes from './routes/webhookRoutes'; // Import webhook routes
 import walletRoutes from './routes/walletRoutes'; // Import wallet routes
 import tableRoutes from './routes/tableRoutes'; // Import table routes
 import userRoutes from './routes/userRoutes'; // Import user routes
+import rtcRoutes from './routes/rtcRoutes';
+import contestRoutes from './routes/contestRoutes';
+import ticketRoutes from './routes/ticketRoutes';
 import authMiddleware from './middleware/auth'; // Import auth middleware
 import passport from 'passport';
 import './config/passport'; // Import passport config
@@ -38,6 +41,9 @@ app.use('/api/webhook', webhookRoutes); // Use webhook routes
 app.use('/api/wallet', walletRoutes); // Use wallet routes
 app.use('/api/tables', tableRoutes); // Use table routes
 app.use('/api/users', userRoutes); // Use user routes
+app.use('/api/rtc', rtcRoutes);
+app.use('/api/contests', contestRoutes);
+app.use('/api/tickets', ticketRoutes);
 
 // Protected route example
 app.get('/api/protected', authMiddleware, (req, res) => {

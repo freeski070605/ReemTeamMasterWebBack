@@ -6,6 +6,8 @@ import Transaction from '../models/Transaction';
 import authMiddleware from '../middleware/auth';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+import { FinancialService } from '../services/financialService';
+import { logLedgerEntry } from '../services/ledgerService';
 
 dotenv.config();
 
@@ -60,10 +62,14 @@ router.post('/request-withdrawal', authMiddleware, async (req: Request, res: Res
     });
     await withdrawalRequest.save();
 
-    // Update wallet balances
-    wallet.availableBalance -= amount;
-    wallet.pendingWithdrawals += amount;
-    await wallet.save();
+    // Reserve USD funds through the new financial boundary.
+    await FinancialService.withdraw(userId, amount, {
+      referenceType: 'withdrawal_request',
+      referenceId: withdrawalRequest._id.toString(),
+      metadata: {
+        payoutMethod,
+      },
+    });
 
     // Create a new transaction
     const transaction = new Transaction({
@@ -101,6 +107,32 @@ router.get('/balance', authMiddleware, async (req: Request, res: Response) => {
     res.status(200).json({ balance: wallet.availableBalance });
   } catch (error) {
     console.error('Error fetching wallet balance:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Get user's dual wallet balances (USD + RTC)
+router.get('/balances', authMiddleware, async (req: Request, res: Response) => {
+  const userId = (req.user as ITokenPayload)?.id;
+
+  if (!userId) {
+    return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
+  }
+
+  try {
+    const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(userId) });
+    if (!wallet) {
+      return res.status(404).json({ message: 'Wallet not found' });
+    }
+
+    res.status(200).json({
+      usdBalance: wallet.usdBalance,
+      rtcBalance: wallet.rtcBalance,
+      lastRtcRefill: wallet.lastRtcRefill,
+      legacyBalance: wallet.availableBalance,
+    });
+  } catch (error) {
+    console.error('Error fetching wallet balances:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
@@ -175,6 +207,22 @@ router.post('/admin/withdrawals/:id/process', authMiddleware, async (req: Reques
         { "details.withdrawalRequestId": request._id },
         { status: 'Completed' }
       );
+
+      await logLedgerEntry({
+        userId: request.userId,
+        currency: 'USD',
+        eventType: 'USD_WITHDRAWAL',
+        direction: 'debit',
+        amount: request.amount,
+        status: 'completed',
+        balanceAfter: wallet.usdBalance,
+        referenceType: 'withdrawal_request',
+        referenceId: request._id.toString(),
+        metadata: {
+          action: 'approve',
+          transactionId: request.transactionId,
+        },
+      });
     } else {
       request.status = 'rejected';
       request.processedAt = new Date();
@@ -188,6 +236,21 @@ router.post('/admin/withdrawals/:id/process', authMiddleware, async (req: Reques
         { "details.withdrawalRequestId": request._id },
         { status: 'Failed' }
       );
+
+      await logLedgerEntry({
+        userId: request.userId,
+        currency: 'USD',
+        eventType: 'USD_WITHDRAWAL',
+        direction: 'credit',
+        amount: request.amount,
+        status: 'failed',
+        balanceAfter: wallet.usdBalance,
+        referenceType: 'withdrawal_request',
+        referenceId: request._id.toString(),
+        metadata: {
+          action: 'reject',
+        },
+      });
     }
 
     await request.save();

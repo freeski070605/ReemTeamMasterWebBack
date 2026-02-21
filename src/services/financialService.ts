@@ -1,15 +1,14 @@
-import mongoose, { Types } from 'mongoose';
-import Wallet, { WalletDocument } from '../models/Wallet';
+import mongoose from 'mongoose';
+import { WalletDocument } from '../models/Wallet';
 import { GameMode } from '../domain/gameMode';
 import { logLedgerEntry } from './ledgerService';
+import { ensureWalletForUser } from './walletProvisioningService';
 
 interface FinancialReference {
   referenceType?: string;
   referenceId?: string;
   metadata?: Record<string, unknown>;
 }
-
-const toObjectId = (userId: string): Types.ObjectId => new Types.ObjectId(userId);
 
 const assertPositiveAmount = (amount: number, fieldName: string = 'amount') => {
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -21,16 +20,10 @@ const getWalletByUserId = async (
   userId: string,
   session?: mongoose.ClientSession
 ): Promise<WalletDocument> => {
-  const query = Wallet.findOne({ userId: toObjectId(userId) });
+  const wallet = await ensureWalletForUser(userId);
   if (session) {
-    query.session(session);
+    wallet.$session(session);
   }
-
-  const wallet = await query;
-  if (!wallet) {
-    throw new Error(`Wallet not found for user ${userId}.`);
-  }
-
   return wallet;
 };
 
@@ -183,4 +176,3 @@ export class FinancialService {
     });
   }
 }
-

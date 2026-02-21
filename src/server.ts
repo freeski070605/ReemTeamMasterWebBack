@@ -6,6 +6,7 @@ import { connectRedis } from './config/redis';
 import setupSocketHandlers from './sockets'; // Import the socket handlers
 import dotenv from 'dotenv';
 import { socketCorsOptions } from './config/cors';
+import { backfillWalletsForExistingUsers } from './services/walletProvisioningService';
 
 dotenv.config();
 
@@ -22,6 +23,11 @@ const startServer = async () => {
   try {
     // Connect to MongoDB
     await connectDB();
+
+    const walletBackfill = await backfillWalletsForExistingUsers();
+    console.log(
+      `Wallet backfill complete. created=${walletBackfill.created}, normalized=${walletBackfill.normalized}`
+    );
 
     // Connect to Redis
     await connectRedis();

@@ -1,4 +1,3 @@
-import { Types } from 'mongoose';
 import {
   RTC_DAILY_MINIMUM,
   RTC_PURCHASE_BUNDLES,
@@ -6,16 +5,15 @@ import {
   RtcPurchaseBundle,
 } from '../config/economy';
 import { GameMode } from '../domain/gameMode';
-import Wallet, { WalletDocument } from '../models/Wallet';
+import { WalletDocument } from '../models/Wallet';
 import { logLedgerEntry } from './ledgerService';
+import { ensureWalletForUser } from './walletProvisioningService';
 
 interface RtcReference {
   referenceType?: string;
   referenceId?: string;
   metadata?: Record<string, unknown>;
 }
-
-const toObjectId = (userId: string): Types.ObjectId => new Types.ObjectId(userId);
 
 const assertPositiveAmount = (amount: number, fieldName: string = 'amount') => {
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -24,12 +22,7 @@ const assertPositiveAmount = (amount: number, fieldName: string = 'amount') => {
 };
 
 const getWalletByUserId = async (userId: string): Promise<WalletDocument> => {
-  const wallet = await Wallet.findOne({ userId: toObjectId(userId) });
-  if (!wallet) {
-    throw new Error(`Wallet not found for user ${userId}.`);
-  }
-
-  return wallet;
+  return ensureWalletForUser(userId);
 };
 
 const getRtcBundle = (bundleId: string): RtcPurchaseBundle => {
@@ -292,4 +285,3 @@ export class RtcEconomyService {
     return wallet;
   }
 }
-

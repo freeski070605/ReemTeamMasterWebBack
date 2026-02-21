@@ -1,4 +1,5 @@
 import { Schema, model, Types, HydratedDocument, InferSchemaType } from 'mongoose';
+import { RTC_DAILY_MINIMUM } from '../config/economy';
 
 const earningSchema = new Schema({
   matchId: { type: Schema.Types.ObjectId, required: true },
@@ -34,7 +35,7 @@ const walletSchema = new Schema({
   availableBalance: {
     type: Number,
     required: true,
-    default: 25,
+    default: 0,
   },
   pendingWithdrawals: {
     type: Number,
@@ -63,6 +64,24 @@ walletSchema.pre('save', function syncLegacyUsdBalance() {
   const wallet = this as any;
   const usdChanged = wallet.isModified('usdBalance');
   const legacyChanged = wallet.isModified('availableBalance');
+
+  if (typeof wallet.usdBalance !== 'number' || Number.isNaN(wallet.usdBalance)) {
+    wallet.usdBalance = typeof wallet.availableBalance === 'number' && Number.isFinite(wallet.availableBalance)
+      ? wallet.availableBalance
+      : 0;
+  }
+
+  if (typeof wallet.availableBalance !== 'number' || Number.isNaN(wallet.availableBalance)) {
+    wallet.availableBalance = wallet.usdBalance;
+  }
+
+  if (typeof wallet.rtcBalance !== 'number' || Number.isNaN(wallet.rtcBalance)) {
+    wallet.rtcBalance = RTC_DAILY_MINIMUM;
+  }
+
+  if (!(wallet.lastRtcRefill instanceof Date) || Number.isNaN(wallet.lastRtcRefill.getTime())) {
+    wallet.lastRtcRefill = new Date();
+  }
 
   if (legacyChanged && !usdChanged) {
     wallet.usdBalance = wallet.availableBalance;

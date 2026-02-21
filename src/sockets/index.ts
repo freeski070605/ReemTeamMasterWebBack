@@ -4,13 +4,13 @@ import { getAIPlayerAction } from "../game/aiPlayer"; // Import AI logic
 import Table, { TableDocument } from "../models/Table"; // Import TableDocument
 import Contest, { ContestDocument } from "../models/Contest";
 import User from "../models/User";
-import Wallet from "../models/Wallet";
 import { Card } from "../game/deck";
 import { redisClient } from "../config/redis"; // Import redisClient
 import mongoose from "mongoose";
 import { GameMode } from "../domain/gameMode";
 import { ModeController } from "../services/modeController";
 import { ContestService } from "../services/contestService";
+import { ensureWalletForUser } from "../services/walletProvisioningService";
 
 // Define a type for our socket with custom properties
 interface CustomSocket extends Socket {
@@ -24,9 +24,6 @@ const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
 
 const resolveBalanceForMode = (wallet: any | null, mode?: GameMode): number => {
   if (!wallet) return 0;
-  if (!mode) {
-    return wallet.availableBalance ?? wallet.usdBalance ?? 0;
-  }
   if (mode === GameMode.USD_CONTEST) {
     return wallet.usdBalance ?? wallet.availableBalance ?? 0;
   }
@@ -112,7 +109,7 @@ const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: 
 
     const balances = await Promise.all(
       humanPlayers.map(async (player) => {
-        const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(player.userId) });
+        const wallet = await ensureWalletForUser(player.userId);
         return {
           userId: player.userId,
           balance: resolveBalanceForMode(wallet, gameState.mode),
@@ -715,10 +712,10 @@ const setupSocketHandlers = (io: Server) => {
 
       // Validate player's balance for new joins only (USD contest joins are validated via ContestService).
       if (tableMode !== GameMode.USD_CONTEST) {
-        const wallet = await Wallet.findOne({ userId: new mongoose.Types.ObjectId(userId) });
+        const wallet = await ensureWalletForUser(userId);
         const requiredEntryBuffer = isContinuousMode(tableMode) ? table.stake * 4 : table.stake;
         const availableForMode = resolveBalanceForMode(wallet, tableMode);
-        if (!wallet || availableForMode < requiredEntryBuffer) {
+        if (availableForMode < requiredEntryBuffer) {
           return socket.emit("gameError", {
             message: "Insufficient RTC balance to join this table.",
           });

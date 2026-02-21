@@ -1,11 +1,11 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import User from '../models/User';
-import Wallet from '../models/Wallet'; // Import Wallet model
 import { generateToken } from '../utils/jwt';
 import { ITokenPayload } from '../utils/jwt'; // Import ITokenPayload
 import passport from 'passport';
 import axios from 'axios';
+import { ensureWalletForUser } from '../services/walletProvisioningService';
 
 const router = Router();
 
@@ -32,19 +32,7 @@ router.post('/register', async (req: Request, res: Response) => {
     });
     await user.save();
 
-    // Create a new wallet for the user
-    const wallet = new Wallet({
-      userId: user._id,
-      usdBalance: 0,
-      rtcBalance: 1000,
-      lastRtcRefill: new Date(),
-      availableBalance: 0,
-      pendingWithdrawals: 0,
-      lifetimeDeposits: 0,
-      lifetimeWithdrawals: 0,
-      matchEarningsHistory: [],
-    });
-    await wallet.save();
+    await ensureWalletForUser(user._id);
 
     // Generate JWT token
     const tokenPayload: ITokenPayload = {
@@ -80,6 +68,8 @@ router.post('/login', async (req: Request, res: Response) => {
     if (!isMatch) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
+
+    await ensureWalletForUser(user._id);
 
     // Generate JWT token
     const tokenPayload: ITokenPayload = {
@@ -189,19 +179,9 @@ router.post('/facebook/token', async (req: Request, res: Response) => {
       });
       await user.save();
 
-      const wallet = new Wallet({
-        userId: user._id,
-        usdBalance: 0,
-        rtcBalance: 1000,
-        lastRtcRefill: new Date(),
-        availableBalance: 0,
-        pendingWithdrawals: 0,
-        lifetimeDeposits: 0,
-        lifetimeWithdrawals: 0,
-        matchEarningsHistory: [],
-      });
-      await wallet.save();
     }
+
+    await ensureWalletForUser(user._id);
 
     const tokenPayload: ITokenPayload = {
       id: user._id.toString(),

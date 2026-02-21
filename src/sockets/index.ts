@@ -34,6 +34,10 @@ const isContinuousMode = (mode?: GameMode): boolean => {
   return mode === GameMode.FREE_RTC_TABLE || mode === undefined;
 };
 
+const isCribTableMode = (mode?: GameMode): boolean => {
+  return mode === GameMode.FREE_RTC_TABLE || mode === undefined;
+};
+
 const isCompetitionMode = (mode?: GameMode): boolean => {
   return mode === GameMode.RTC_TOURNAMENT || mode === GameMode.RTC_SATELLITE || mode === GameMode.USD_CONTEST;
 };
@@ -654,7 +658,12 @@ const setupSocketHandlers = (io: Server) => {
       if (!table) {
         return socket.emit("gameError", { message: "Table not found." });
       }
-      const tableMode = table.mode as GameMode;
+      const tableMode = (table.mode as GameMode | undefined)
+        ?? ((contestId || table.activeContestId) ? GameMode.USD_CONTEST : GameMode.FREE_RTC_TABLE);
+
+      if (!table.mode) {
+        table.mode = tableMode;
+      }
 
       // Check if player is already in the table
       const existingPlayer = table.players.find(p => p.userId.toString() === userId);
@@ -737,7 +746,7 @@ const setupSocketHandlers = (io: Server) => {
       socket.username = username;
       
       // Check if we need to add an AI to start the game immediately (1 User vs 1 AI)
-      if (table.currentPlayerCount === 1 && isContinuousMode(tableMode)) {
+      if (table.currentPlayerCount === 1 && isCribTableMode(tableMode)) {
           console.log(`Only 1 player in table ${tableId}, adding an AI opponent.`);
           const aiUserId = new mongoose.Types.ObjectId().toString();
           const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
@@ -757,9 +766,9 @@ const setupSocketHandlers = (io: Server) => {
         : table.minPlayers;
       
       if (table.currentPlayerCount >= requiredPlayersToStart && table.status === "waiting") {
-        if (isCompetitionMode(tableMode) && playersInTable.some((player) => player.isAI)) {
+        if (tableMode === GameMode.USD_CONTEST && playersInTable.some((player) => player.isAI)) {
           return socket.emit("gameError", {
-            message: `${tableMode} mode cannot start with AI players.`,
+            message: "Cash Crown sessions cannot include AI players.",
           });
         }
 

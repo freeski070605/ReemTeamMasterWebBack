@@ -24,6 +24,4 @@ Environment variables (set in Render):
 - `SQUARE_ENVIRONMENT` (`sandbox` or `production`)
 - `SQUARE_LOCATION_ID`
 - `SQUARE_WEBHOOK_SECRET`
-- `FACEBOOK_APP_ID`
-- `FACEBOOK_APP_SECRET`
 - `MIN_WITHDRAWAL_AMOUNT`

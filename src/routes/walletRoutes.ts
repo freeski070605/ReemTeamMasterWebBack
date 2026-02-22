@@ -3,6 +3,7 @@ import { ITokenPayload } from '../utils/jwt';
 import WithdrawalRequest from '../models/WithdrawalRequest';
 import Transaction from '../models/Transaction';
 import authMiddleware from '../middleware/auth';
+import adminMiddleware from '../middleware/admin';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { FinancialService } from '../services/financialService';
@@ -157,8 +158,7 @@ router.get('/my-withdrawals', authMiddleware, async (req: Request, res: Response
 });
 
 // Admin: Get all pending withdrawals
-router.get('/admin/withdrawals', authMiddleware, async (req: Request, res: Response) => {
-  // TODO: Add admin role check
+router.get('/admin/withdrawals', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
   try {
     const withdrawalRequests = await WithdrawalRequest.find({ status: 'pending' }).populate('userId', 'username email').sort({ requestedAt: 1 });
     res.status(200).json(withdrawalRequests);
@@ -169,8 +169,7 @@ router.get('/admin/withdrawals', authMiddleware, async (req: Request, res: Respo
 });
 
 // Admin: Process withdrawal
-router.post('/admin/withdrawals/:id/process', authMiddleware, async (req: Request, res: Response) => {
-  // TODO: Add admin role check
+router.post('/admin/withdrawals/:id/process', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
   const { action, transactionId } = req.body; // action: 'approve' | 'reject'
 

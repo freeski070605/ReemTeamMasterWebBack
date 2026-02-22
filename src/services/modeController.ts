@@ -302,12 +302,14 @@ export class ModeController {
     const humanPlayers = gameState.players.filter((player) => !player.isAI);
     const hasAI = gameState.players.some((player) => player.isAI);
 
-    if (humanPlayers.length < 2) {
-      throw new Error('At least two human players are required to start this mode.');
-    }
-
     switch (mode) {
       case GameMode.FREE_RTC_TABLE:
+        if (humanPlayers.length < 1) {
+          throw new Error('At least one human player is required to start this mode.');
+        }
+        if (gameState.players.length < 2) {
+          throw new Error('FREE_RTC_TABLE requires at least two seated players.');
+        }
         for (const player of humanPlayers) {
           await RtcEconomyService.rtcAnte(player.userId, gameState.baseStake, mode, {
             referenceType: 'free_rtc_round_entry',
@@ -317,6 +319,9 @@ export class ModeController {
         break;
       case GameMode.RTC_TOURNAMENT:
       case GameMode.RTC_SATELLITE:
+        if (humanPlayers.length < 2) {
+          throw new Error('At least two human players are required to start this mode.');
+        }
         if (hasAI) {
           throw new Error(`${mode} does not allow AI players.`);
         }
@@ -328,6 +333,9 @@ export class ModeController {
         }
         break;
       case GameMode.USD_CONTEST:
+        if (humanPlayers.length < 2) {
+          throw new Error('At least two human players are required to start this mode.');
+        }
         if (hasAI) {
           throw new Error('USD_CONTEST does not allow AI players.');
         }

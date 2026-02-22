@@ -10,6 +10,7 @@ export interface ITokenPayload {
   id: string;
   username: string;
   email: string;
+  isAdmin?: boolean;
 }
 
 export const generateToken = (payload: ITokenPayload): string => {

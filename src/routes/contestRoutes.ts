@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import authMiddleware from '../middleware/auth';
+import adminMiddleware from '../middleware/admin';
 import { ITokenPayload } from '../utils/jwt';
 import { ContestService } from '../services/contestService';
 import Contest from '../models/Contest';
@@ -33,7 +34,7 @@ router.get('/:contestId', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+router.post('/', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
   try {
     const { entryFee, playerCount, platformFee, payoutStructure } = req.body ?? {};
     const contest = await ContestService.createContest({
@@ -86,8 +87,7 @@ router.post('/:contestId/join', authMiddleware, async (req: Request, res: Respon
   }
 });
 
-router.post('/:contestId/start', authMiddleware, async (req: Request, res: Response) => {
-  // TODO: add admin/host authorization check when roles are implemented.
+router.post('/:contestId/start', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
   try {
     const contest = await ContestService.startContest(getParam(req.params.contestId));
     return res.status(200).json(contest);
@@ -96,8 +96,7 @@ router.post('/:contestId/start', authMiddleware, async (req: Request, res: Respo
   }
 });
 
-router.post('/:contestId/complete', authMiddleware, async (req: Request, res: Response) => {
-  // TODO: add trusted-service authorization check; this should be called by match settlement orchestration.
+router.post('/:contestId/complete', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
   try {
     const placements = Array.isArray(req.body?.placements) ? req.body.placements : [];
     const result = await ContestService.completeContest({

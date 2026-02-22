@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import Transaction from '../models/Transaction';
 import mongoose from 'mongoose';
 import { FinancialService } from '../services/financialService';
+import { ApiError, squareClient } from '../utils/squareApi';
 
 dotenv.config();
 
@@ -14,6 +15,33 @@ const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:5000').replace
 const SQUARE_WEBHOOK_NOTIFICATION_URL = (
   process.env.SQUARE_WEBHOOK_NOTIFICATION_URL || `${BACKEND_URL}/api/webhook/square-webhook`
 ).trim();
+
+const getUserIdFromOrder = async (orderId: string): Promise<string | null> => {
+  try {
+    const orderResponse = await squareClient.orders.get({ orderId });
+    const metadataUserId = orderResponse.order?.metadata?.userId;
+    if (typeof metadataUserId === 'string' && metadataUserId.trim().length > 0) {
+      return metadataUserId.trim();
+    }
+
+    const referenceId = orderResponse.order?.referenceId;
+    if (typeof referenceId === 'string') {
+      const match = referenceId.match(/^wallet_deposit:([a-f\d]{24})(?::|$)/i);
+      if (match?.[1]) {
+        return match[1];
+      }
+    }
+  } catch (error) {
+    if (error instanceof ApiError) {
+      console.warn(`Square Webhook: Failed to load order ${orderId} for metadata lookup.`, error.errors);
+      return null;
+    }
+    console.warn(`Square Webhook: Unexpected error loading order ${orderId} for metadata lookup.`, error);
+    return null;
+  }
+
+  return null;
+};
 
 router.post('/square-webhook', async (req: Request, res: Response) => {
   const signatureHeader = req.headers['x-square-hmacsha256-signature'];
@@ -63,7 +91,7 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
 
   if (type === 'payment.updated' && payment?.status === 'COMPLETED') {
     const paymentId = typeof payment.id === 'string' ? payment.id : '';
-    const orderId = typeof payment.order_id === 'string' ? payment.order_id : undefined;
+    const orderId = typeof payment.order_id === 'string' ? payment.order_id : '';
     const amountMinor = Number(payment.amount_money?.amount);
     const currency = payment.amount_money?.currency;
 
@@ -85,10 +113,14 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
       return res.status(200).json({ message: 'Duplicate payment event ignored.' });
     }
 
-    const userIdFromMetadata = typeof payment.metadata?.userId === 'string' ? payment.metadata.userId : '';
+    let userIdFromMetadata = typeof payment.metadata?.userId === 'string' ? payment.metadata.userId : '';
+    if (!userIdFromMetadata && orderId) {
+      userIdFromMetadata = (await getUserIdFromOrder(orderId)) || '';
+    }
+
     if (!userIdFromMetadata) {
-      console.warn('Square Webhook: No userId in payment metadata. Cannot credit wallet automatically.');
-      return res.status(200).json({ message: 'Payment processed, but user wallet not credited due to missing userId in metadata.' });
+      console.warn('Square Webhook: No userId in payment or order metadata. Cannot credit wallet automatically.');
+      return res.status(200).json({ message: 'Payment processed, but user wallet not credited due to missing userId metadata.' });
     }
 
     if (!mongoose.Types.ObjectId.isValid(userIdFromMetadata)) {
@@ -102,7 +134,7 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
         referenceType: 'square_payment',
         referenceId: paymentId,
         metadata: {
-          orderId,
+          orderId: orderId || undefined,
           currency,
         },
       });

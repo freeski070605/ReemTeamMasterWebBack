@@ -1,15 +1,42 @@
 import { Router, Request, Response } from 'express';
-import { ApiError, FRONTEND_URL } from '../utils/squareApi';
+import { ApiError, FRONTEND_URL, squareClient } from '../utils/squareApi';
 import { randomUUID } from 'crypto';
 import authMiddleware from '../middleware/auth';
 
 const router = Router();
 
-import axios from 'axios';
+const resolveSquareLocationId = async (): Promise<string | null> => {
+  const configuredLocationId = (process.env.SQUARE_LOCATION_ID || '').trim();
+
+  const locationsResponse = await squareClient.locations.list();
+  const locations = locationsResponse.locations ?? [];
+  if (locations.length === 0) {
+    return null;
+  }
+
+  const activeLocations = locations.filter(
+    (location) => (location.status || '').toUpperCase() === 'ACTIVE'
+  );
+  const candidateLocations = activeLocations.length > 0 ? activeLocations : locations;
+
+  if (configuredLocationId) {
+    const exactMatch = candidateLocations.find((location) => location.id === configuredLocationId);
+    if (exactMatch?.id) {
+      return exactMatch.id;
+    }
+
+    const fallback = candidateLocations[0];
+    console.warn(
+      `Configured SQUARE_LOCATION_ID ${configuredLocationId} is not available to this token. Falling back to ${fallback?.id}.`
+    );
+    return fallback?.id || null;
+  }
+
+  return candidateLocations[0]?.id || null;
+};
 
 router.post('/create-checkout', authMiddleware, async (req: Request, res: Response) => {
   const { amount } = req.body;
-  console.log('user object from token:', req.user);
   const userId = (req.user as any)?.id;
 
   if (!userId) {
@@ -21,103 +48,56 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
   }
 
   try {
-    const idempotencyKey = randomUUID();
-    const locationId = process.env.SQUARE_LOCATION_ID;
+    const locationId = await resolveSquareLocationId();
     const frontendBaseUrl = FRONTEND_URL.replace(/\/$/, '');
 
     if (!locationId) {
-      console.error('Square location ID is not set.');
-      return res.status(500).json({ message: 'Server configuration error.' });
+      return res.status(500).json({ message: 'Square location is not configured or accessible for this access token.' });
     }
 
-    // 1. Create an Order
-    const orderApiUrl = process.env.SQUARE_ENVIRONMENT === 'sandbox'
-      ? 'https://connect.squareupsandbox.com/v2/orders'
-      : 'https://connect.squareup.com/v2/orders';
-
-    const orderResponse = await axios.post(
-      orderApiUrl,
-      {
-        order: {
-          location_id: locationId,
-          line_items: [
-            {
-              name: `Wallet Deposit for User ${userId}`,
-              quantity: "1",
-              base_price_money: {
-                amount: Math.round(amount * 100),
-                currency: "USD",
-              },
-            },
-          ],
-          metadata: {
-            userId,
-          },
-        },
-        idempotency_key: idempotencyKey,
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.SQUARE_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-          'Square-Version': '2023-10-18',
-        },
-      }
-    );
-
-    const order = orderResponse.data.order;
-
-    if (!order || !order.id) {
-      return res.status(500).json({ message: 'Failed to create Square order.' });
-    }
-
-    // 2. Create a Checkout Link via raw REST call
-    const checkoutPayload = {
-      idempotency_key: randomUUID(),
+    const amountMinor = Math.round(amount * 100);
+    const paymentLinkResponse = await squareClient.checkout.paymentLinks.create({
+      idempotencyKey: randomUUID(),
       order: {
-        id: order.id,
-        location_id: locationId,
+        locationId,
+        referenceId: `wallet_deposit:${userId}:${Date.now()}`,
+        metadata: { userId },
+        lineItems: [
+          {
+            name: `Wallet Deposit for User ${userId}`,
+            quantity: '1',
+            basePriceMoney: {
+              amount: BigInt(amountMinor),
+              currency: 'USD',
+            },
+          },
+        ],
       },
-      checkout_options: {
-        redirect_url: `${frontendBaseUrl}/account?paymentStatus=success`,
+      checkoutOptions: {
+        redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success`,
       },
-       metadata: { // Pass metadata to the checkout as well
-         userId,
-       },
-    };
+      paymentNote: `Wallet deposit for user ${userId}`,
+    });
 
-    const squareApiUrl = process.env.SQUARE_ENVIRONMENT === 'sandbox'
-      ? 'https://connect.squareupsandbox.com/v2/checkout'
-      : 'https://connect.squareup.com/v2/checkout';
-
-    const checkoutResponse = await axios.post(
-      squareApiUrl,
-      checkoutPayload,
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.SQUARE_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    const checkoutUrl = checkoutResponse.data.checkout?.checkout_page_url;
+    const checkoutUrl = paymentLinkResponse.paymentLink?.url;
 
     if (checkoutUrl) {
       res.status(200).json({ checkoutUrl });
     } else {
-      res.status(500).json({ message: 'Failed to create Square checkout link.' });
+      res.status(500).json({
+        message: 'Failed to create Square checkout link.',
+        errors: paymentLinkResponse.errors ?? [],
+      });
     }
 
   } catch (error: unknown) {
     if (error instanceof ApiError) {
       console.error('Square API Error:', error.errors);
-      res.status(400).json({ message: 'Square API Error', errors: error.errors });
-    } else if (axios.isAxiosError(error)) {
-        console.error('Axios Error creating checkout:', error.response?.data);
-        res.status(500).json({ message: 'Error creating checkout link.', details: error.response?.data });
-    }
-    else {
+      const status = typeof error.statusCode === 'number' && error.statusCode >= 400
+        ? error.statusCode
+        : 502;
+      res.status(status).json({ message: 'Square API Error', errors: error.errors });
+    } else {
       console.error('Error creating checkout:', error);
       res.status(500).json({ message: 'Internal server error.' });
     }

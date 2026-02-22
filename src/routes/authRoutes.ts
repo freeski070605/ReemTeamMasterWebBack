@@ -60,6 +60,7 @@ router.post('/register', async (req: Request, res: Response) => {
       userId: user._id,
       username: user.username,
       email: user.email,
+      avatarUrl: user.avatarUrl,
       isAdmin: user.isAdmin ?? false,
     });
   } catch (error) {
@@ -110,6 +111,7 @@ router.post('/login', async (req: Request, res: Response) => {
       userId: user._id,
       username: user.username,
       email: user.email,
+      avatarUrl: user.avatarUrl,
       isAdmin: user.isAdmin ?? false,
     });
   } catch (error) {

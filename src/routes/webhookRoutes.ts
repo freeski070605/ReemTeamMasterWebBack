@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { SquareClient, SquareEnvironment } from 'square';
+import { WebhooksHelper } from 'square';
 import dotenv from 'dotenv';
 import Transaction from '../models/Transaction';
 import mongoose from 'mongoose';
@@ -10,56 +10,100 @@ dotenv.config();
 const router = Router();
 
 const SQUARE_WEBHOOK_SECRET = process.env.SQUARE_WEBHOOK_SECRET || '';
-const SQUARE_ENVIRONMENT = process.env.SQUARE_ENVIRONMENT === 'production' ? SquareEnvironment.Production : SquareEnvironment.Sandbox;
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5000'; // Define BACKEND_URL
-
-// Initialize Square client for API calls (though webhooks don't use it directly, good to have for validation)
-const squareClient = new SquareClient({
-  token: process.env.SQUARE_ACCESS_TOKEN || '',
-  environment: SQUARE_ENVIRONMENT,
-});
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:5000').replace(/\/$/, '');
+const SQUARE_WEBHOOK_NOTIFICATION_URL = (
+  process.env.SQUARE_WEBHOOK_NOTIFICATION_URL || `${BACKEND_URL}/api/webhook/square-webhook`
+).trim();
 
 router.post('/square-webhook', async (req: Request, res: Response) => {
-  const signature = req.headers['x-square-signature'] as string;
-  const url = BACKEND_URL + req.originalUrl; // Use BACKEND_URL
-  const body = JSON.stringify(req.body);
+  const signatureHeader = req.headers['x-square-hmacsha256-signature'];
 
-  // TODO: Enable actual signature verification in production
-  // if (!squareClient.webhook().verifySignature(body, signature, SQUARE_WEBHOOK_SECRET, url)) {
-  //   return res.status(401).json({ message: 'Unauthorized: Invalid webhook signature.' });
-  // }
+  if (typeof signatureHeader !== 'string' || signatureHeader.length === 0) {
+    return res.status(401).json({ message: 'Unauthorized: Missing webhook signature.' });
+  }
 
-  const { type, data } = req.body;
+  if (!SQUARE_WEBHOOK_SECRET) {
+    console.error('Square webhook secret is not configured.');
+    return res.status(500).json({ message: 'Webhook secret not configured.' });
+  }
 
-  if (type === 'payment.updated' && data.object.payment.status === 'COMPLETED') {
-    const payment = data.object.payment;
-    const orderId = payment.order_id; // Or from metadata if custom order ID was used
-    const amountMoney = payment.amount_money;
+  const requestBody = Buffer.isBuffer(req.body)
+    ? req.body.toString('utf8')
+    : typeof req.body === 'string'
+      ? req.body
+      : JSON.stringify(req.body ?? {});
 
-    if (!amountMoney || !amountMoney.amount) {
-      console.error('Webhook: Missing amount_money in payment.updated event.');
-      return res.status(400).json({ message: 'Missing amount information.' });
+  let signatureIsValid = false;
+  try {
+    signatureIsValid = await WebhooksHelper.verifySignature({
+      requestBody,
+      signatureHeader,
+      signatureKey: SQUARE_WEBHOOK_SECRET,
+      notificationUrl: SQUARE_WEBHOOK_NOTIFICATION_URL,
+    });
+  } catch (signatureError) {
+    console.error('Square Webhook: Signature verification failed:', signatureError);
+    return res.status(401).json({ message: 'Unauthorized: Invalid webhook signature.' });
+  }
+
+  if (!signatureIsValid) {
+    return res.status(401).json({ message: 'Unauthorized: Invalid webhook signature.' });
+  }
+
+  let payload: any;
+  try {
+    payload = JSON.parse(requestBody);
+  } catch (parseError) {
+    console.error('Square Webhook: Invalid JSON payload.', parseError);
+    return res.status(400).json({ message: 'Invalid JSON payload.' });
+  }
+
+  const type = payload?.type;
+  const payment = payload?.data?.object?.payment;
+
+  if (type === 'payment.updated' && payment?.status === 'COMPLETED') {
+    const paymentId = typeof payment.id === 'string' ? payment.id : '';
+    const orderId = typeof payment.order_id === 'string' ? payment.order_id : undefined;
+    const amountMinor = Number(payment.amount_money?.amount);
+    const currency = payment.amount_money?.currency;
+
+    if (!paymentId || !Number.isFinite(amountMinor) || amountMinor <= 0) {
+      console.error('Square Webhook: Missing payment id or amount in payment.updated event.');
+      return res.status(400).json({ message: 'Missing payment amount information.' });
     }
 
-    const amount = Number(amountMoney.amount) / 100; // Convert cents to dollars
-    // In a real scenario, you would have stored userId in the payment metadata when creating the payment link
-    // For this example, let's assume userId is extracted from a custom field or a predefined value.
-    console.log(`Square Webhook: Payment completed for order ${orderId}. Amount: ${amount} ${amountMoney.currency}`);
+    const amount = amountMinor / 100;
+    console.log(`Square Webhook: Payment completed for order ${orderId || 'N/A'}. Amount: ${amount} ${currency || ''}`);
 
-    const userIdFromMetadata = payment.metadata.userId; // Assuming metadata was passed
+    const existingTransaction = await Transaction.findOne({
+      type: 'Deposit',
+      status: 'Completed',
+      'details.paymentId': paymentId,
+    }).lean();
+
+    if (existingTransaction) {
+      return res.status(200).json({ message: 'Duplicate payment event ignored.' });
+    }
+
+    const userIdFromMetadata = typeof payment.metadata?.userId === 'string' ? payment.metadata.userId : '';
     if (!userIdFromMetadata) {
       console.warn('Square Webhook: No userId in payment metadata. Cannot credit wallet automatically.');
       return res.status(200).json({ message: 'Payment processed, but user wallet not credited due to missing userId in metadata.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(userIdFromMetadata)) {
+      console.warn(`Square Webhook: Invalid metadata userId ${userIdFromMetadata}.`);
+      return res.status(200).json({ message: 'Payment processed, but user wallet not credited due to invalid userId metadata.' });
     }
 
     try {
       const userObjectId = new mongoose.Types.ObjectId(userIdFromMetadata);
       await FinancialService.deposit(userIdFromMetadata, amount, {
         referenceType: 'square_payment',
-        referenceId: payment.id,
+        referenceId: paymentId,
         metadata: {
           orderId,
-          currency: amountMoney.currency,
+          currency,
         },
       });
 
@@ -70,12 +114,12 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
         amount: amount,
         status: 'Completed',
         details: {
-          paymentId: payment.id,
+          paymentId,
         },
       });
       await transaction.save();
 
-      console.log(`Wallet for user ${userIdFromMetadata} credited with ${amount} ${amountMoney.currency}.`);
+      console.log(`Wallet for user ${userIdFromMetadata} credited with ${amount} ${currency || ''}.`);
     } catch (dbError: unknown) { // Explicitly type dbError as unknown
       console.error('Square Webhook: Database error updating wallet:', dbError);
       return res.status(500).json({ message: 'Internal server error during wallet update.' });

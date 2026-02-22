@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="avatarTwoTitle">
+  <title id="avatarTwoTitle">Default Avatar 2</title>
+  <defs>
+    <linearGradient id="avatarTwoBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0ea5e9" />
+      <stop offset="100%" stop-color="#075985" />
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="128" fill="url(#avatarTwoBg)" />
+  <circle cx="128" cy="98" r="42" fill="#e0f2fe" />
+  <path d="M60 219c8-40 34-63 68-63s60 23 68 63" fill="#e0f2fe" />
+</svg>

@@ -1,9 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { ApiError, FRONTEND_URL, SQUARE_ENVIRONMENT } from '../utils/squareApi';
+import { ApiError, FRONTEND_URL } from '../utils/squareApi';
 import { randomUUID } from 'crypto';
-import Wallet from '../models/Wallet';
 import authMiddleware from '../middleware/auth';
-import mongoose from 'mongoose';
 
 const router = Router();
 
@@ -25,6 +23,7 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
   try {
     const idempotencyKey = randomUUID();
     const locationId = process.env.SQUARE_LOCATION_ID;
+    const frontendBaseUrl = FRONTEND_URL.replace(/\/$/, '');
 
     if (!locationId) {
       console.error('Square location ID is not set.');
@@ -80,7 +79,7 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
         location_id: locationId,
       },
       checkout_options: {
-        redirect_url: `${FRONTEND_URL}/wallet?paymentStatus=success&userId=${userId}&amount=${amount}`,
+        redirect_url: `${frontendBaseUrl}/account?paymentStatus=success`,
       },
        metadata: { // Pass metadata to the checkout as well
          userId,

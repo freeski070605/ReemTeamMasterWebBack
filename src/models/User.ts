@@ -17,17 +17,14 @@ const userSchema = new Schema({
   },
   passwordHash: {
     type: String,
+    // Keep legacy records savable if they predate credential-only auth.
     required: function() {
-      return !(this as any).socialProvider;
+      return this.isNew || !!(this as any).passwordHash;
     },
   },
   avatarUrl: {
     type: String,
-    default: '/avatars/default.png',
-  },
-  socialProvider: {
-    name: String,
-    id: String,
+    default: '/avatars/default.svg',
   },
   isAdmin: {
     type: Boolean,

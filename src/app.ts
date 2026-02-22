@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import authRoutes from './routes/authRoutes'; // Import auth routes
 import paymentRoutes from './routes/paymentRoutes'; // Import payment routes
 import webhookRoutes from './routes/webhookRoutes'; // Import webhook routes
@@ -17,15 +18,10 @@ const app = express();
 
 // Middleware
 app.use(cors(corsOptions));
-// IMPORTANT: Square webhooks send raw body, so we need a conditional body parser
-app.use((req, res, next) => {
-  if (req.originalUrl === '/api/webhook/square-webhook') {
-    next(); // Skip express.json() for Square webhooks
-  } else {
-    express.json()(req, res, next);
-  }
-});
+app.use('/api/webhook/square-webhook', express.raw({ type: 'application/json' }));
+app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // For parsing application/x-www-form-urlencoded
+app.use('/avatars', express.static(path.resolve(__dirname, '../public/avatars')));
 
 // Basic Route
 app.get('/', (req, res) => {

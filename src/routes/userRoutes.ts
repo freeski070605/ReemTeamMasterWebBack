@@ -1,26 +1,49 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
 import User from '../models/User';
 import authMiddleware from '../middleware/auth';
 
 const router = Router();
+const AVATAR_DIRECTORY = path.resolve(__dirname, '../../public/avatars');
+
+fs.mkdirSync(AVATAR_DIRECTORY, { recursive: true });
 
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'public/avatars');
+  destination: function (_req, _file, cb) {
+    cb(null, AVATAR_DIRECTORY);
   },
-  filename: function (req: any, file, cb) {
+  filename: function (req: Request, file, cb) {
+    const userId = req.user?.id || 'unknown-user';
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, req.user.id + '-' + uniqueSuffix + '.' + file.mimetype.split('/')[1]);
+    const extFromName = path.extname(file.originalname || '').toLowerCase();
+    const extFromMime = file.mimetype.split('/')[1];
+    const extension = extFromName || (extFromMime ? `.${extFromMime}` : '.png');
+    cb(null, `${userId}-${uniqueSuffix}${extension}`);
   }
 });
 
-const upload = multer({ storage: storage });
+const upload = multer({
+  storage,
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+      return;
+    }
 
-router.post('/avatar/upload', authMiddleware, upload.single('avatar'), async (req: any, res: Response) => {
+    cb(new Error('Only image uploads are allowed.'));
+  },
+});
+
+const uploadAvatarHandler = async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: 'No file uploaded.' });
+    }
+
+    if (!req.user?.id) {
+      return res.status(401).json({ message: 'Unauthorized' });
     }
 
     const user = await User.findById(req.user.id);
@@ -28,7 +51,7 @@ router.post('/avatar/upload', authMiddleware, upload.single('avatar'), async (re
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    user.avatarUrl = '/' + req.file.path.replace(/\\\\/g, "/");;
+    user.avatarUrl = `/avatars/${req.file.filename}`;
     await user.save();
 
     res.json({ message: 'Avatar uploaded successfully.', avatarUrl: user.avatarUrl });
@@ -36,13 +59,26 @@ router.post('/avatar/upload', authMiddleware, upload.single('avatar'), async (re
     console.error(error);
     res.status(500).json({ message: 'Server error' });
   }
-});
+};
 
-router.post('/avatar/select-default', authMiddleware, async (req: any, res: Response) => {
+const selectDefaultAvatarHandler = async (req: Request, res: Response) => {
   try {
-    const { avatarUrl } = req.body;
-    if (!avatarUrl) {
+    const { avatarUrl } = req.body as { avatarUrl?: string };
+    const normalizedAvatarUrl = typeof avatarUrl === 'string' ? avatarUrl.trim() : '';
+    const resolvedAvatarUrl = normalizedAvatarUrl
+      .replace(/^\/avatars\/avatar([1-4])\.png$/i, '/avatars/avatar$1.svg')
+      .replace(/^\/avatars\/default\.png$/i, '/avatars/default.svg');
+
+    if (!normalizedAvatarUrl) {
       return res.status(400).json({ message: 'No avatarUrl provided.' });
+    }
+
+    if (!/^\/avatars\/avatar[1-4]\.svg$/i.test(resolvedAvatarUrl) && resolvedAvatarUrl !== '/avatars/default.svg') {
+      return res.status(400).json({ message: 'Unsupported default avatar.' });
+    }
+
+    if (!req.user?.id) {
+      return res.status(401).json({ message: 'Unauthorized' });
     }
 
     const user = await User.findById(req.user.id);
@@ -50,7 +86,7 @@ router.post('/avatar/select-default', authMiddleware, async (req: any, res: Resp
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    user.avatarUrl = avatarUrl;
+    user.avatarUrl = resolvedAvatarUrl;
     await user.save();
 
     res.json({ message: 'Avatar updated successfully.', avatarUrl: user.avatarUrl });
@@ -58,31 +94,11 @@ router.post('/avatar/select-default', authMiddleware, async (req: any, res: Resp
     console.error(error);
     res.status(500).json({ message: 'Server error' });
   }
-});
+};
 
-router.put('/link-social', authMiddleware, async (req: any, res: Response) => {
-  try {
-    const { provider, id } = req.body;
-    if (!provider || !id) {
-      return res.status(400).json({ message: 'Provider and id are required.' });
-    }
-
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found.' });
-    }
-
-    user.socialProvider = {
-      name: provider,
-      id: id,
-    };
-    await user.save();
-
-    res.json({ message: 'Social account linked successfully.' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
+router.post('/avatar/upload', authMiddleware, upload.single('avatar'), uploadAvatarHandler);
+router.post('/avatar', authMiddleware, upload.single('avatar'), uploadAvatarHandler);
+router.post('/avatar/select-default', authMiddleware, selectDefaultAvatarHandler);
+router.post('/avatar/default', authMiddleware, selectDefaultAvatarHandler);
 
 export default router;

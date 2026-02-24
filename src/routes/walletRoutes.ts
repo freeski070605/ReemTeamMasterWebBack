@@ -266,13 +266,20 @@ router.post('/admin/withdrawals/:id/process', authMiddleware, adminMiddleware, a
 // Get user's transactions
 router.get('/transactions', authMiddleware, async (req: Request, res: Response) => {
   const userId = (req.user as ITokenPayload)?.id;
+  const { currency } = req.query;
 
   if (!userId) {
     return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
   }
 
   try {
-    const transactions = await Transaction.find({ userId: new mongoose.Types.ObjectId(userId) }).sort({ date: -1 });
+    const query: any = { userId: new mongoose.Types.ObjectId(userId) };
+
+    if (currency) {
+      query.currency = currency as string;
+    }
+
+    const transactions = await Transaction.find(query).sort({ date: -1 });
     res.status(200).json(transactions);
   } catch (error) {
     console.error('Error fetching transactions:', error);

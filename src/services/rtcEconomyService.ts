@@ -8,6 +8,7 @@ import { GameMode } from '../domain/gameMode';
 import { WalletDocument } from '../models/Wallet';
 import { logLedgerEntry } from './ledgerService';
 import { ensureWalletForUser } from './walletProvisioningService';
+import { TransactionService } from './transactionService';
 
 interface RtcReference {
   referenceType?: string;
@@ -47,6 +48,17 @@ export class RtcEconomyService {
 
     wallet.rtcBalance += bundle.rtcAmount;
     await wallet.save();
+
+    await TransactionService.createTransaction({
+      userId,
+      type: 'RtcPurchase',
+      amount: bundle.rtcAmount,
+      currency: 'RTC',
+      status: 'Completed',
+      details: {
+        bundleId: bundle.id,
+      },
+    });
 
     await logLedgerEntry({
       userId,
@@ -104,6 +116,14 @@ export class RtcEconomyService {
     await wallet.save();
 
     if (refillAmount > 0) {
+      await TransactionService.createTransaction({
+        userId,
+        type: 'RtcRefill',
+        amount: refillAmount,
+        currency: 'RTC',
+        status: 'Completed',
+      });
+
       await logLedgerEntry({
         userId,
         currency: 'RTC',
@@ -154,6 +174,17 @@ export class RtcEconomyService {
     wallet.rtcBalance -= amount;
     await wallet.save();
 
+    await TransactionService.createTransaction({
+      userId,
+      type: 'RtcAnte',
+      amount,
+      currency: 'RTC',
+      status: 'Completed',
+      details: {
+        matchId: reference.referenceId as any,
+      },
+    });
+
     await logLedgerEntry({
       userId,
       currency: 'RTC',
@@ -191,6 +222,17 @@ export class RtcEconomyService {
     wallet.rtcBalance -= amount;
     await wallet.save();
 
+    await TransactionService.createTransaction({
+      userId,
+      type: 'RtcEntry',
+      amount,
+      currency: 'RTC',
+      status: 'Completed',
+      details: {
+        contestId: reference.referenceId,
+      },
+    });
+
     await logLedgerEntry({
       userId,
       currency: 'RTC',
@@ -219,6 +261,17 @@ export class RtcEconomyService {
     const wallet = await getWalletByUserId(userId);
     wallet.rtcBalance += amount;
     await wallet.save();
+
+    await TransactionService.createTransaction({
+      userId,
+      type: 'RtcWin',
+      amount,
+      currency: 'RTC',
+      status: 'Completed',
+      details: {
+        matchId: reference.referenceId as any,
+      },
+    });
 
     await logLedgerEntry({
       userId,

@@ -15,6 +15,7 @@ import authMiddleware from './middleware/auth'; // Import auth middleware
 import { corsOptions } from './config/cors';
 
 const app = express();
+app.set('trust proxy', true);
 
 // Middleware
 app.use(cors(corsOptions));

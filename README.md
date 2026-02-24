@@ -24,6 +24,7 @@ Environment variables (set in Render):
 - `SQUARE_ENVIRONMENT` (`sandbox` or `production`)
 - `SQUARE_LOCATION_ID`
 - `SQUARE_WEBHOOK_SECRET`
+- `SQUARE_WEBHOOK_SECRETS` (optional comma-separated fallback list when multiple Square subscriptions are active)
 - `SQUARE_WEBHOOK_NOTIFICATION_URL` (optional override; defaults to `${BACKEND_URL}/api/webhook/square-webhook`; `/api/webhooks/square` is also supported)
 - `MIN_WITHDRAWAL_AMOUNT`
 

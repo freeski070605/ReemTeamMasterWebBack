@@ -13,7 +13,24 @@ dotenv.config();
 
 const router = Router();
 
-const SQUARE_WEBHOOK_SECRET = process.env.SQUARE_WEBHOOK_SECRET || '';
+const SQUARE_WEBHOOK_SECRET = (process.env.SQUARE_WEBHOOK_SECRET || '').trim();
+const SQUARE_WEBHOOK_SECRETS = (() => {
+  const combined = new Set<string>();
+  const addSecretsFromRaw = (raw: string | undefined) => {
+    if (!raw) {
+      return;
+    }
+    raw
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .forEach((entry) => combined.add(entry));
+  };
+
+  addSecretsFromRaw(process.env.SQUARE_WEBHOOK_SECRETS);
+  addSecretsFromRaw(SQUARE_WEBHOOK_SECRET);
+  return Array.from(combined);
+})();
 const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:5000').replace(/\/$/, '');
 const SQUARE_WEBHOOK_NOTIFICATION_URL = (
   process.env.SQUARE_WEBHOOK_NOTIFICATION_URL || `${BACKEND_URL}/api/webhook/square-webhook`
@@ -64,10 +81,12 @@ const buildWebhookUrlCandidates = (req: Request): string[] => {
 
   addCandidate(SQUARE_WEBHOOK_NOTIFICATION_URL);
 
-  const host = readMetadataString(req.header('x-forwarded-host')) || readMetadataString(req.header('host'));
+  const forwardedHostHeader = readMetadataString(req.header('x-forwarded-host'));
+  const forwardedHost = forwardedHostHeader?.split(',')[0]?.trim() || null;
+  const host = forwardedHost || readMetadataString(req.header('host'));
   const forwardedProtoHeader = readMetadataString(req.header('x-forwarded-proto'));
   const forwardedProto = forwardedProtoHeader ? forwardedProtoHeader.split(',')[0]?.trim() : null;
-  const protocolCandidates = [forwardedProto, req.protocol];
+  const protocolCandidates = [forwardedProto, req.protocol, 'https', 'http'];
 
   if (host) {
     for (const protocol of protocolCandidates) {
@@ -175,13 +194,18 @@ const getOrderContext = async (orderId: string): Promise<SquareOrderContext> => 
 };
 
 const handleSquareWebhook = async (req: Request, res: Response) => {
-  const signatureHeader = req.headers['x-square-hmacsha256-signature'];
+  const signatureHeaderValue = req.headers['x-square-hmacsha256-signature']
+    ?? req.headers['x-square-signature'];
+  const signatureHeader = Array.isArray(signatureHeaderValue)
+    ? signatureHeaderValue[0]
+    : signatureHeaderValue;
 
   if (typeof signatureHeader !== 'string' || signatureHeader.length === 0) {
+    console.warn('Square Webhook: Missing signature header.');
     return res.status(401).json({ message: 'Unauthorized: Missing webhook signature.' });
   }
 
-  if (!SQUARE_WEBHOOK_SECRET) {
+  if (SQUARE_WEBHOOK_SECRETS.length === 0) {
     console.error('Square webhook secret is not configured.');
     return res.status(500).json({ message: 'Webhook secret not configured.' });
   }
@@ -194,32 +218,48 @@ const handleSquareWebhook = async (req: Request, res: Response) => {
 
   let signatureIsValid = false;
   let matchedNotificationUrl: string | null = null;
+  let matchedSecretIndex: number | null = null;
   const webhookUrlCandidates = buildWebhookUrlCandidates(req);
 
-  for (const notificationUrl of webhookUrlCandidates) {
-    try {
-      const candidateValid = await WebhooksHelper.verifySignature({
-        requestBody,
-        signatureHeader,
-        signatureKey: SQUARE_WEBHOOK_SECRET,
-        notificationUrl,
-      });
+  for (let secretIndex = 0; secretIndex < SQUARE_WEBHOOK_SECRETS.length; secretIndex += 1) {
+    const signatureKey = SQUARE_WEBHOOK_SECRETS[secretIndex];
+    for (const notificationUrl of webhookUrlCandidates) {
+      try {
+        const candidateValid = await WebhooksHelper.verifySignature({
+          requestBody,
+          signatureHeader,
+          signatureKey,
+          notificationUrl,
+        });
 
-      if (candidateValid) {
-        signatureIsValid = true;
-        matchedNotificationUrl = notificationUrl;
-        break;
+        if (candidateValid) {
+          signatureIsValid = true;
+          matchedNotificationUrl = notificationUrl;
+          matchedSecretIndex = secretIndex;
+          break;
+        }
+      } catch (signatureError) {
+        console.warn(
+          `Square Webhook: Signature verification error for candidate URL ${notificationUrl}.`,
+          signatureError
+        );
       }
-    } catch (signatureError) {
-      console.warn(
-        `Square Webhook: Signature verification error for candidate URL ${notificationUrl}.`,
-        signatureError
-      );
+    }
+
+    if (signatureIsValid) {
+      break;
     }
   }
 
   if (!signatureIsValid) {
+    console.warn(
+      `Square Webhook: Invalid signature after trying ${SQUARE_WEBHOOK_SECRETS.length} secret(s) and ${webhookUrlCandidates.length} URL candidate(s).`
+    );
     return res.status(401).json({ message: 'Unauthorized: Invalid webhook signature.' });
+  }
+
+  if (matchedSecretIndex !== null && matchedSecretIndex > 0) {
+    console.warn(`Square Webhook: Signature matched a fallback secret at index ${matchedSecretIndex}.`);
   }
 
   if (matchedNotificationUrl && normalizeWebhookUrlCandidate(SQUARE_WEBHOOK_NOTIFICATION_URL) !== matchedNotificationUrl) {

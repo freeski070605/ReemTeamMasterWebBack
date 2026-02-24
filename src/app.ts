@@ -19,6 +19,9 @@ const app = express();
 // Middleware
 app.use(cors(corsOptions));
 app.use('/api/webhook/square-webhook', express.raw({ type: 'application/json' }));
+app.use('/api/webhook/square', express.raw({ type: 'application/json' }));
+app.use('/api/webhooks/square-webhook', express.raw({ type: 'application/json' }));
+app.use('/api/webhooks/square', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // For parsing application/x-www-form-urlencoded
 app.use('/avatars', express.static(path.resolve(__dirname, '../public/avatars')));
@@ -32,6 +35,7 @@ app.get('/', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/payment', paymentRoutes); // Use payment routes
 app.use('/api/webhook', webhookRoutes); // Use webhook routes
+app.use('/api/webhooks', webhookRoutes); // Square dashboard compatibility alias
 app.use('/api/wallet', walletRoutes); // Use wallet routes
 app.use('/api/tables', tableRoutes); // Use table routes
 app.use('/api/users', userRoutes); // Use user routes

@@ -174,7 +174,7 @@ const getOrderContext = async (orderId: string): Promise<SquareOrderContext> => 
   return EMPTY_ORDER_CONTEXT;
 };
 
-router.post('/square-webhook', async (req: Request, res: Response) => {
+const handleSquareWebhook = async (req: Request, res: Response) => {
   const signatureHeader = req.headers['x-square-hmacsha256-signature'];
 
   if (typeof signatureHeader !== 'string' || signatureHeader.length === 0) {
@@ -386,6 +386,9 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
   }
 
   res.status(200).json({ message: 'Webhook received and processed.' });
-});
+};
+
+router.post('/square-webhook', handleSquareWebhook);
+router.post('/square', handleSquareWebhook);
 
 export default router;

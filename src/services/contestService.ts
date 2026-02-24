@@ -191,16 +191,17 @@ export class ContestService {
   }
 
   static async createContest(input: CreateContestInput) {
-    assertPositive(input.entryFee, 'entryFee');
+    const entryFee = roundCurrency(input.entryFee);
+    assertPositive(entryFee, 'entryFee');
     const playerCount = normalizePlayerCount(input.playerCount);
-    const totalCollected = roundCurrency(input.entryFee * playerCount);
+    const totalCollected = roundCurrency(entryFee * playerCount);
     const platformFee = normalizePlatformFee(input.platformFee, totalCollected);
     const prizePool = roundCurrency(totalCollected - platformFee);
 
     const payoutStructure = sanitizePayoutRules(input.payoutStructure, prizePool);
     const contest = new Contest({
       mode: GameMode.USD_CONTEST,
-      entryFee: roundCurrency(input.entryFee),
+      entryFee,
       playerCount,
       prizePool,
       platformFee,

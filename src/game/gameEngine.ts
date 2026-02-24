@@ -1,5 +1,6 @@
 import { Card, createDeck, shuffleDeck, dealCards, CardRank, CardSuit } from './deck';
 import { redisClient } from '../config/redis';
+import { resolveStakeAmountForMode } from '../config/economy';
 import Table, { TableDocument } from '../models/Table';
 import { DEFAULT_GAME_MODE, GameMode } from '../domain/gameMode';
 
@@ -262,6 +263,7 @@ export const initializeGame = async (
     ? ((options.dealerIndex % players.length) + players.length) % players.length
     : 0;
   const firstTurnPlayerIndex = players.length > 0 ? (dealerIndex + 1) % players.length : 0;
+  const resolvedBaseStake = resolveStakeAmountForMode(table.stake, table.mode);
 
   let initialGameState: IGameState = {
     tableId: table._id.toString(),
@@ -275,7 +277,7 @@ export const initializeGame = async (
     currentPlayerIndex: firstTurnPlayerIndex, // Start with player clockwise from dealer
     lastAction: null,
     status: 'starting', // Explicitly set as literal type
-    baseStake: table.stake,
+    baseStake: resolvedBaseStake,
     roundWins: {}, // Track round wins for each player
     pot: 0, // Initialize pot to 0
     lockedAntes: {},

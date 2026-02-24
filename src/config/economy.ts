@@ -1,3 +1,5 @@
+import { GameMode } from '../domain/gameMode';
+
 export const RTC_DAILY_MINIMUM = 1000;
 export const RTC_REFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const RTC_STAKE_MULTIPLIER = 1000;
@@ -18,3 +20,9 @@ export const scaleStakeTierToRtc = (stakeTier: number): number => {
   return stakeTier * RTC_STAKE_MULTIPLIER;
 };
 
+export const resolveStakeAmountForMode = (stake: number, mode?: GameMode): number => {
+  if (mode === GameMode.USD_CONTEST) {
+    return stake;
+  }
+  return scaleStakeTierToRtc(stake);
+};

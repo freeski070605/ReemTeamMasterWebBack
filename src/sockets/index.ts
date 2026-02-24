@@ -5,6 +5,7 @@ import Table, { TableDocument } from "../models/Table"; // Import TableDocument
 import Contest, { ContestDocument } from "../models/Contest";
 import User from "../models/User";
 import { Card } from "../game/deck";
+import { resolveStakeAmountForMode } from "../config/economy";
 import { redisClient } from "../config/redis"; // Import redisClient
 import mongoose from "mongoose";
 import { GameMode } from "../domain/gameMode";
@@ -21,6 +22,7 @@ interface CustomSocket extends Socket {
 
 const ROUND_READY_DURATION_MS = 30000;
 const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
+const roundCurrency = (value: number): number => Math.round(value * 100) / 100;
 
 const resolveBalanceForMode = (wallet: any | null, mode?: GameMode): number => {
   if (!wallet) return 0;
@@ -78,7 +80,7 @@ const bindPlayerToUsdContest = async (
     throw new Error("Only USD_CONTEST contest sessions can bind to USD_CONTEST tables.");
   }
 
-  if (contest.entryFee !== table.stake) {
+  if (roundCurrency(contest.entryFee) !== roundCurrency(table.stake)) {
     throw new Error("Contest entry fee does not match this table stake.");
   }
 
@@ -722,7 +724,8 @@ const setupSocketHandlers = (io: Server) => {
       // Validate player's balance for new joins only (USD contest joins are validated via ContestService).
       if (tableMode !== GameMode.USD_CONTEST) {
         const wallet = await ensureWalletForUser(userId);
-        const requiredEntryBuffer = isContinuousMode(tableMode) ? table.stake * 4 : table.stake;
+        const resolvedStakeAmount = resolveStakeAmountForMode(table.stake, tableMode);
+        const requiredEntryBuffer = isContinuousMode(tableMode) ? resolvedStakeAmount * 4 : resolvedStakeAmount;
         const availableForMode = resolveBalanceForMode(wallet, tableMode);
         if (availableForMode < requiredEntryBuffer) {
           return socket.emit("gameError", {

@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || '';
+const SQUARE_ACCESS_TOKEN = (process.env.SQUARE_ACCESS_TOKEN || '').trim();
 const rawSquareEnvironment = (process.env.SQUARE_ENVIRONMENT || 'sandbox').trim().toLowerCase();
 const SQUARE_ENVIRONMENT = rawSquareEnvironment === 'production'
   ? SquareEnvironment.Production

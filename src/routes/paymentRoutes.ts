@@ -113,6 +113,15 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
   } catch (error: unknown) {
     if (error instanceof ApiError) {
       console.error('Square API Error:', error.errors);
+      const isSquareAuthFailure = error.statusCode === 401
+        || (error.errors ?? []).some((entry) => entry.category === 'AUTHENTICATION_ERROR');
+      if (isSquareAuthFailure) {
+        const currentSquareEnvironment = (process.env.SQUARE_ENVIRONMENT || 'sandbox').trim().toLowerCase();
+        return res.status(502).json({
+          message: `Square credentials are invalid for ${currentSquareEnvironment}. Verify SQUARE_ACCESS_TOKEN and SQUARE_ENVIRONMENT (sandbox vs production).`,
+          errors: error.errors,
+        });
+      }
       const status = typeof error.statusCode === 'number' && error.statusCode >= 400
         ? error.statusCode
         : 502;

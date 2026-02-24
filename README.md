@@ -24,4 +24,13 @@ Environment variables (set in Render):
 - `SQUARE_ENVIRONMENT` (`sandbox` or `production`)
 - `SQUARE_LOCATION_ID`
 - `SQUARE_WEBHOOK_SECRET`
+- `SQUARE_WEBHOOK_NOTIFICATION_URL` (optional override; defaults to `${BACKEND_URL}/api/webhook/square-webhook`)
 - `MIN_WITHDRAWAL_AMOUNT`
+
+## Square RTC purchase flow
+
+- Frontend calls `POST /api/payment/create-rtc-checkout` with a configured `bundleId`.
+- Backend creates a Square payment link with RTC metadata (`purchaseType=rtc_bundle`, `bundleId`, `userId`).
+- If you already created Square catalog products/variations, set `squareCatalogObjectId` on each RTC bundle in `src/config/economy.ts` to attach that catalog item to the checkout line item.
+- Square sends `payment.updated` webhook events to `/api/webhook/square-webhook`.
+- Backend verifies the webhook signature and credits RTC only after a completed payment.

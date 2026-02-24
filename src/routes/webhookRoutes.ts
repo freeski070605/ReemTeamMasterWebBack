@@ -5,6 +5,9 @@ import Transaction from '../models/Transaction';
 import mongoose from 'mongoose';
 import { FinancialService } from '../services/financialService';
 import { ApiError, squareClient } from '../utils/squareApi';
+import LedgerEntry from '../models/LedgerEntry';
+import { RTC_PURCHASE_BUNDLES } from '../config/economy';
+import { RtcEconomyService } from '../services/rtcEconomyService';
 
 dotenv.config();
 
@@ -16,31 +19,65 @@ const SQUARE_WEBHOOK_NOTIFICATION_URL = (
   process.env.SQUARE_WEBHOOK_NOTIFICATION_URL || `${BACKEND_URL}/api/webhook/square-webhook`
 ).trim();
 
-const getUserIdFromOrder = async (orderId: string): Promise<string | null> => {
+interface SquareOrderContext {
+  userId: string | null;
+  purchaseType: string | null;
+  bundleId: string | null;
+}
+
+const readMetadataString = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const getOrderContext = async (orderId: string): Promise<SquareOrderContext> => {
+  const emptyContext: SquareOrderContext = {
+    userId: null,
+    purchaseType: null,
+    bundleId: null,
+  };
+
   try {
     const orderResponse = await squareClient.orders.get({ orderId });
-    const metadataUserId = orderResponse.order?.metadata?.userId;
-    if (typeof metadataUserId === 'string' && metadataUserId.trim().length > 0) {
-      return metadataUserId.trim();
+    const metadata = orderResponse.order?.metadata ?? {};
+
+    const metadataUserId = readMetadataString(metadata.userId);
+    const purchaseType = readMetadataString(metadata.purchaseType);
+    const bundleId = readMetadataString(metadata.bundleId);
+
+    if (metadataUserId) {
+      return {
+        userId: metadataUserId,
+        purchaseType,
+        bundleId,
+      };
     }
 
     const referenceId = orderResponse.order?.referenceId;
     if (typeof referenceId === 'string') {
-      const match = referenceId.match(/^wallet_deposit:([a-f\d]{24})(?::|$)/i);
+      const match = referenceId.match(/^(?:wallet_deposit|rtc_purchase):([a-f\d]{24})(?::|$)/i);
       if (match?.[1]) {
-        return match[1];
+        return {
+          userId: match[1],
+          purchaseType,
+          bundleId,
+        };
       }
     }
   } catch (error) {
     if (error instanceof ApiError) {
       console.warn(`Square Webhook: Failed to load order ${orderId} for metadata lookup.`, error.errors);
-      return null;
+      return emptyContext;
     }
     console.warn(`Square Webhook: Unexpected error loading order ${orderId} for metadata lookup.`, error);
-    return null;
+    return emptyContext;
   }
 
-  return null;
+  return emptyContext;
 };
 
 router.post('/square-webhook', async (req: Request, res: Response) => {
@@ -103,6 +140,83 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
     const amount = amountMinor / 100;
     console.log(`Square Webhook: Payment completed for order ${orderId || 'N/A'}. Amount: ${amount} ${currency || ''}`);
 
+    const orderContext = orderId ? await getOrderContext(orderId) : {
+      userId: null,
+      purchaseType: null,
+      bundleId: null,
+    };
+    const userIdFromPayment = readMetadataString(payment.metadata?.userId);
+    const purchaseTypeFromPayment = readMetadataString(payment.metadata?.purchaseType);
+    const bundleIdFromPayment = readMetadataString(payment.metadata?.bundleId);
+
+    const userIdFromMetadata = userIdFromPayment || orderContext.userId || '';
+    const purchaseType = purchaseTypeFromPayment || orderContext.purchaseType || 'usd_deposit';
+    const bundleId = bundleIdFromPayment || orderContext.bundleId || '';
+
+    if (purchaseType === 'rtc_bundle') {
+      if (!bundleId) {
+        console.warn('Square Webhook: RTC payment missing bundleId metadata.');
+        return res.status(200).json({ message: 'Payment processed, but RTC wallet not credited due to missing bundleId metadata.' });
+      }
+
+      if (!userIdFromMetadata) {
+        console.warn('Square Webhook: RTC payment missing userId metadata.');
+        return res.status(200).json({ message: 'Payment processed, but RTC wallet not credited due to missing userId metadata.' });
+      }
+
+      if (!mongoose.Types.ObjectId.isValid(userIdFromMetadata)) {
+        console.warn(`Square Webhook: Invalid RTC metadata userId ${userIdFromMetadata}.`);
+        return res.status(200).json({ message: 'Payment processed, but RTC wallet not credited due to invalid userId metadata.' });
+      }
+
+      const bundle = RTC_PURCHASE_BUNDLES.find((item) => item.id === bundleId);
+      if (!bundle) {
+        console.warn(`Square Webhook: Unknown RTC bundle ${bundleId}.`);
+        return res.status(200).json({ message: 'Payment processed, but RTC wallet not credited due to unknown bundle.' });
+      }
+
+      const expectedAmountMinor = Math.round(bundle.usdPrice * 100);
+      if (amountMinor !== expectedAmountMinor) {
+        console.warn(
+          `Square Webhook: RTC amount mismatch for bundle ${bundleId}. expected=${expectedAmountMinor}, actual=${amountMinor}.`
+        );
+        return res.status(200).json({ message: 'Payment processed, but RTC wallet not credited due to amount mismatch.' });
+      }
+
+      const existingRtcCredit = await LedgerEntry.findOne({
+        currency: 'RTC',
+        eventType: 'RTC_PURCHASE',
+        referenceType: 'square_payment',
+        referenceId: paymentId,
+      }).lean();
+
+      if (existingRtcCredit) {
+        return res.status(200).json({ message: 'Duplicate RTC payment event ignored.' });
+      }
+
+      try {
+        await RtcEconomyService.rtcPurchase(userIdFromMetadata, bundleId, {
+          referenceType: 'square_payment',
+          referenceId: paymentId,
+          metadata: {
+            orderId: orderId || undefined,
+            currency,
+            amountMinor,
+            purchaseType,
+          },
+        });
+
+        console.log(
+          `RTC wallet for user ${userIdFromMetadata} credited with ${bundle.rtcAmount} RTC from payment ${paymentId}.`
+        );
+      } catch (dbError: unknown) {
+        console.error('Square Webhook: Database error updating RTC wallet:', dbError);
+        return res.status(500).json({ message: 'Internal server error during RTC wallet update.' });
+      }
+
+      return res.status(200).json({ message: 'RTC payment webhook processed successfully.' });
+    }
+
     const existingTransaction = await Transaction.findOne({
       type: 'Deposit',
       status: 'Completed',
@@ -111,11 +225,6 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
 
     if (existingTransaction) {
       return res.status(200).json({ message: 'Duplicate payment event ignored.' });
-    }
-
-    let userIdFromMetadata = typeof payment.metadata?.userId === 'string' ? payment.metadata.userId : '';
-    if (!userIdFromMetadata && orderId) {
-      userIdFromMetadata = (await getUserIdFromOrder(orderId)) || '';
     }
 
     if (!userIdFromMetadata) {
@@ -136,6 +245,7 @@ router.post('/square-webhook', async (req: Request, res: Response) => {
         metadata: {
           orderId: orderId || undefined,
           currency,
+          purchaseType,
         },
       });
 

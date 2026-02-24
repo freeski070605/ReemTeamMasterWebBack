@@ -14,7 +14,7 @@ router.get('/bundles', (_req: Request, res: Response) => {
 
 router.post('/purchase', authMiddleware, async (req: Request, res: Response) => {
   const userId = (req.user as ITokenPayload)?.id;
-  const { bundleId, paymentReferenceId } = req.body ?? {};
+  const { bundleId } = req.body ?? {};
 
   if (!userId) {
     return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
@@ -24,26 +24,9 @@ router.post('/purchase', authMiddleware, async (req: Request, res: Response) => 
     return res.status(400).json({ message: 'bundleId is required.' });
   }
 
-  try {
-    // TODO: Verify paymentReferenceId with payment provider before crediting in production.
-    const { wallet, bundle } = await RtcEconomyService.rtcPurchase(userId, bundleId, {
-      referenceType: 'rtc_purchase',
-      referenceId: paymentReferenceId || bundleId,
-      metadata: {
-        paymentReferenceId: paymentReferenceId || null,
-      },
-    });
-
-    return res.status(200).json({
-      message: 'RTC purchase credited.',
-      bundle,
-      rtcBalance: wallet.rtcBalance,
-    });
-  } catch (error: any) {
-    return res.status(400).json({
-      message: error?.message || 'Failed to process RTC purchase.',
-    });
-  }
+  return res.status(410).json({
+    message: 'Direct RTC purchase endpoint is disabled. Use /api/payment/create-rtc-checkout and wait for Square webhook confirmation.',
+  });
 });
 
 router.post('/refill', authMiddleware, async (req: Request, res: Response) => {
@@ -70,4 +53,3 @@ router.post('/refill', authMiddleware, async (req: Request, res: Response) => {
 });
 
 export default router;
-

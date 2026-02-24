@@ -115,7 +115,10 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
       order: {
         locationId,
         referenceId: buildSquareReferenceId(userIdString),
-        metadata: { userId: userIdString },
+        metadata: {
+          userId: userIdString,
+          purchaseType: 'usd_deposit',
+        },
         lineItems: [
           {
             name: `Wallet Deposit for User ${userIdString}`,
@@ -130,7 +133,7 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
       checkoutOptions: {
         redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success&paymentType=usd`,
       },
-      paymentNote: `Wallet deposit for user ${userIdString}`,
+      paymentNote: `wallet_deposit:${userIdString}`,
     });
 
     const checkoutUrl = paymentLinkResponse.paymentLink?.url;
@@ -202,7 +205,7 @@ router.post('/create-rtc-checkout', authMiddleware, async (req: Request, res: Re
       checkoutOptions: {
         redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success&paymentType=rtc&bundleId=${encodeURIComponent(bundle.id)}`,
       },
-      paymentNote: `RTC bundle ${bundle.id} purchase for user ${userIdString}`,
+      paymentNote: `rtc_bundle:${bundle.id}:${userIdString}`,
     });
 
     const checkoutUrl = paymentLinkResponse.paymentLink?.url;

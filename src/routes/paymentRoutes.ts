@@ -5,6 +5,25 @@ import authMiddleware from '../middleware/auth';
 
 const router = Router();
 
+const buildSquareReferenceId = (rawUserId: unknown): string => {
+  const userId = typeof rawUserId === 'string'
+    ? rawUserId.trim()
+    : String(rawUserId ?? '').trim();
+
+  const directReference = `wallet_deposit:${userId}`;
+  if (directReference.length <= 40) {
+    return directReference;
+  }
+
+  // Square enforces a 40-char max on order.reference_id.
+  const compactUserId = userId.replace(/[^a-fA-F0-9]/g, '').toLowerCase().slice(0, 24);
+  if (compactUserId) {
+    return `wallet_deposit:${compactUserId}`;
+  }
+
+  return `wallet_deposit:${randomUUID().replace(/-/g, '').slice(0, 24)}`;
+};
+
 const resolveSquareLocationId = async (): Promise<string | null> => {
   const configuredLocationId = (process.env.SQUARE_LOCATION_ID || '').trim();
 
@@ -38,8 +57,9 @@ const resolveSquareLocationId = async (): Promise<string | null> => {
 router.post('/create-checkout', authMiddleware, async (req: Request, res: Response) => {
   const { amount } = req.body;
   const userId = (req.user as any)?.id;
+  const userIdString = typeof userId === 'string' ? userId.trim() : String(userId ?? '').trim();
 
-  if (!userId) {
+  if (!userIdString) {
     return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
   }
 
@@ -60,11 +80,11 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
       idempotencyKey: randomUUID(),
       order: {
         locationId,
-        referenceId: `wallet_deposit:${userId}:${Date.now()}`,
-        metadata: { userId },
+        referenceId: buildSquareReferenceId(userIdString),
+        metadata: { userId: userIdString },
         lineItems: [
           {
-            name: `Wallet Deposit for User ${userId}`,
+            name: `Wallet Deposit for User ${userIdString}`,
             quantity: '1',
             basePriceMoney: {
               amount: BigInt(amountMinor),
@@ -76,7 +96,7 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
       checkoutOptions: {
         redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success`,
       },
-      paymentNote: `Wallet deposit for user ${userId}`,
+      paymentNote: `Wallet deposit for user ${userIdString}`,
     });
 
     const checkoutUrl = paymentLinkResponse.paymentLink?.url;

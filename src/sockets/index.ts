@@ -387,8 +387,20 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
 
     const nextDealerIndex =
       (previousGameState.currentDealerIndex + 1) % Math.max(1, playersWithDetails.length);
-    const newGameState = await initializeRoundWithEconomy(table, playersWithDetails, { dealerIndex: nextDealerIndex });
+    let newGameState = await initializeRoundWithEconomy(table, playersWithDetails, { dealerIndex: nextDealerIndex });
     await saveGameState(newGameState);
+    await emitWalletBalanceUpdates(io, tableId, newGameState);
+
+    if (newGameState.status === "round-end") {
+      newGameState = await settleRoundAndBroadcast(io, tableId, newGameState);
+      io.to(tableId).emit("tableUpdate", {
+        message: "Round ended on deal. Preparing next round...",
+        table,
+        gameState: newGameState,
+      });
+      io.to(tableId).emit("initialGameState", newGameState);
+      return;
+    }
 
     io.to(tableId).emit("tableUpdate", { message: "Starting new round...", table, gameState: newGameState });
     io.to(tableId).emit("initialGameState", newGameState);
@@ -822,12 +834,22 @@ const setupSocketHandlers = (io: Server) => {
           });
         }
 
-        await saveGameState(gameState);
         table.currentMatchId = new mongoose.Types.ObjectId(); // Create a new Match ID for the table
         await table.save();
-        const startMessage = isContinuousMode(tableMode)
-          ? `${username} joined, game starting with AI.`
-          : `${username} joined, competition session starting.`;
+        await saveGameState(gameState);
+        await emitWalletBalanceUpdates(io, tableId, gameState);
+        if (gameState.status === "round-end") {
+          gameState = await settleRoundAndBroadcast(io, tableId, gameState);
+          const refreshedTable = await Table.findById(tableId);
+          if (refreshedTable) {
+            table = refreshedTable;
+          }
+        }
+        const startMessage = gameState.status === "round-end"
+          ? "Round ended on deal."
+          : isContinuousMode(tableMode)
+            ? `${username} joined, game starting with AI.`
+            : `${username} joined, competition session starting.`;
         io.to(tableId).emit("tableUpdate", { message: startMessage, table, gameState });
         io.to(socket.id).emit("initialGameState", gameState);
         const roundResult = toEngineRoundResult(gameState);

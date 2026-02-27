@@ -377,11 +377,14 @@ const handleTurnExpiration = async (
       return;
     }
 
-    if (currentPlayer.hasDiscardedThisTurn) {
+    const playerHasDrawn = currentPlayer.hasDrawnThisTurn ?? currentPlayer.hasTakenActionThisTurn;
+    const playerHasDiscarded = currentPlayer.hasDiscardedThisTurn ?? false;
+
+    if (playerHasDiscarded) {
       return;
     }
 
-    if (!currentPlayer.hasDrawnThisTurn) {
+    if (!playerHasDrawn) {
       const skippedTurnState = {
         ...nextTurn(gameState),
         lastAction: {

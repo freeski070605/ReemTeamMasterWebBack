@@ -6,6 +6,7 @@ import { DEFAULT_GAME_MODE, GameMode } from '../domain/gameMode';
 
 export type RoundEndType = 'REGULAR' | 'REEM' | 'AUTO_TRIPLE' | 'CAUGHT_DROP' | 'DECK_EMPTY';
 export type PlacementWinType = RoundEndType | 'LOSS';
+export const DEFAULT_TURN_DURATION_MS = 20_000;
 
 export interface IPlacement {
   userId: string;
@@ -39,6 +40,8 @@ export interface IGameState {
     hitLockCounter: number;
     spreads: Card[][];
     hasTakenActionThisTurn: boolean; // To track if any action (draw, spread, hit) was taken
+    hasDrawnThisTurn: boolean;
+    hasDiscardedThisTurn: boolean;
     currentBuyIn: number; // Player's buy-in for the current round
     restrictedDiscardCard: string | null; // Card that cannot be discarded this turn (e.g. if picked from discard pile)
   }>;
@@ -46,6 +49,9 @@ export interface IGameState {
   discardPile: Card[];
   turn: number;
   currentPlayerIndex: number;
+  turnStartTime: number;
+  turnDurationMs: number;
+  turnExpiresAt: number;
   lastAction: { type: string; payload: any; timestamp: number } | null;
   status: 'waiting' | 'starting' | 'in-progress' | 'round-end' | 'game-end';
   baseStake: number;
@@ -230,6 +236,42 @@ export const toEngineRoundResult = (gameState: IGameState): IEngineRoundResult |
   };
 };
 
+const normalizeTurnTrackingState = (gameState: IGameState): IGameState => {
+  const turnDurationMs = gameState.turnDurationMs ?? DEFAULT_TURN_DURATION_MS;
+  const turnStartTime = gameState.turnStartTime ?? Date.now();
+  const turnExpiresAt = gameState.turnExpiresAt ?? (turnStartTime + turnDurationMs);
+  const players = gameState.players.map((player) => ({
+    ...player,
+    hasDrawnThisTurn: player.hasDrawnThisTurn ?? !!player.hasTakenActionThisTurn,
+    hasDiscardedThisTurn: player.hasDiscardedThisTurn ?? false,
+    restrictedDiscardCard: player.restrictedDiscardCard ?? null,
+  }));
+
+  return {
+    ...gameState,
+    status: gameState.status === 'starting' ? 'in-progress' : gameState.status,
+    players,
+    turnDurationMs,
+    turnStartTime,
+    turnExpiresAt,
+  };
+};
+
+const assertActiveTurnAction = (
+  gameState: IGameState,
+  playerIndex: number,
+  userId: string,
+  actionLabel: string
+) => {
+  if (gameState.status === 'round-end' || gameState.status === 'game-end' || gameState.status === 'waiting') {
+    throw new Error(`Cannot ${actionLabel} because the round is not active.`);
+  }
+
+  if (gameState.currentPlayerIndex !== playerIndex) {
+    throw new Error(`It is not player ${userId}'s turn to ${actionLabel}.`);
+  }
+};
+
 /**
  * Initializes a new game for a given table.
  * @param table The table to start the game on.
@@ -255,6 +297,8 @@ export const initializeGame = async (
     hitLockCounter: 0,
     spreads: [],
     hasTakenActionThisTurn: false,
+    hasDrawnThisTurn: false,
+    hasDiscardedThisTurn: false,
     currentBuyIn: 0, // Initial buy-in is 0, handled by handleBuyIn
     restrictedDiscardCard: null,
   }));
@@ -264,6 +308,7 @@ export const initializeGame = async (
     : 0;
   const firstTurnPlayerIndex = players.length > 0 ? (dealerIndex + 1) % players.length : 0;
   const resolvedBaseStake = resolveStakeAmountForMode(table.stake, table.mode);
+  const turnStartTime = Date.now();
 
   let initialGameState: IGameState = {
     tableId: table._id.toString(),
@@ -275,8 +320,11 @@ export const initializeGame = async (
     discardPile: [],
     turn: 1,
     currentPlayerIndex: firstTurnPlayerIndex, // Start with player clockwise from dealer
+    turnStartTime,
+    turnDurationMs: DEFAULT_TURN_DURATION_MS,
+    turnExpiresAt: turnStartTime + DEFAULT_TURN_DURATION_MS,
     lastAction: null,
-    status: 'starting', // Explicitly set as literal type
+    status: 'in-progress',
     baseStake: resolvedBaseStake,
     roundWins: {}, // Track round wins for each player
     pot: 0, // Initialize pot to 0
@@ -327,7 +375,10 @@ export const saveGameState = async (gameState: IGameState) => {
  */
 export const loadGameState = async (tableId: string): Promise<IGameState | null> => {
   const gameStateString = await redisClient.get(`game:${tableId}`);
-  return gameStateString ? JSON.parse(gameStateString) : null;
+  if (!gameStateString) {
+    return null;
+  }
+  return normalizeTurnTrackingState(JSON.parse(gameStateString) as IGameState);
 };
 
 /**
@@ -337,9 +388,13 @@ export const loadGameState = async (tableId: string): Promise<IGameState | null>
  */
 export const nextTurn = (gameState: IGameState): IGameState => {
   const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
-  const updatedPlayers = gameState.players.map((player, index) => ({
+  const turnDurationMs = gameState.turnDurationMs ?? DEFAULT_TURN_DURATION_MS;
+  const turnStartTime = Date.now();
+  const updatedPlayers = gameState.players.map((player) => ({
     ...player,
     hasTakenActionThisTurn: false, // Reset for new turn
+    hasDrawnThisTurn: false,
+    hasDiscardedThisTurn: false,
     hitLockCounter: Math.max(0, player.hitLockCounter - 1),
     isHitLocked: player.hitLockCounter > 0,
     restrictedDiscardCard: null,
@@ -347,8 +402,12 @@ export const nextTurn = (gameState: IGameState): IGameState => {
 
   return {
     ...gameState,
+    status: 'in-progress',
     currentPlayerIndex: nextPlayerIndex,
     turn: gameState.turn + 1,
+    turnStartTime,
+    turnDurationMs,
+    turnExpiresAt: turnStartTime + turnDurationMs,
     lastAction: null,
     players: updatedPlayers,
   };
@@ -361,12 +420,21 @@ export const nextTurn = (gameState: IGameState): IGameState => {
  * @returns The updated game state.
  */
 export const playerDrawCard = async (gameState: IGameState, userId: string, source: 'deck' | 'discard' = 'deck'): Promise<IGameState> => {
+  gameState = normalizeTurnTrackingState(gameState);
   const playerIndex = gameState.players.findIndex(p => p.userId === userId);
   if (playerIndex === -1) {
     throw new Error(`Player ${userId} not found.`);
   }
 
+  assertActiveTurnAction(gameState, playerIndex, userId, 'draw');
   const player = gameState.players[playerIndex];
+  if (player.hasDrawnThisTurn) {
+    throw new Error('You already drew this turn.');
+  }
+  if (player.hasDiscardedThisTurn) {
+    throw new Error('You already discarded this turn.');
+  }
+
   let newDeck = [...gameState.deck];
   let newDiscardPile = [...gameState.discardPile];
   const newHand = [...player.hand];
@@ -408,11 +476,14 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
     ...player,
     hand: newHand,
     hasTakenActionThisTurn: true,
+    hasDrawnThisTurn: true,
+    hasDiscardedThisTurn: false,
     restrictedDiscardCard: restrictedDiscardCard
   };
 
   return {
     ...gameState,
+    status: 'in-progress',
     deck: newDeck,
     discardPile: newDiscardPile,
     players: updatedPlayers,
@@ -428,12 +499,20 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
  * @returns The updated game state.
  */
 export const playerDiscardCard = async (gameState: IGameState, userId: string, cardToDiscard: Card): Promise<IGameState> => {
+  gameState = normalizeTurnTrackingState(gameState);
   const playerIndex = gameState.players.findIndex(p => p.userId === userId);
   if (playerIndex === -1) {
     throw new Error(`Player ${userId} not found.`);
   }
 
+  assertActiveTurnAction(gameState, playerIndex, userId, 'discard');
   const player = gameState.players[playerIndex];
+  if (!player.hasDrawnThisTurn) {
+    throw new Error('You must draw before discarding.');
+  }
+  if (player.hasDiscardedThisTurn) {
+    throw new Error('You already discarded this turn.');
+  }
   const newHand = [...player.hand];
 
   // Check if the card is restricted
@@ -450,12 +529,19 @@ export const playerDiscardCard = async (gameState: IGameState, userId: string, c
   newHand.splice(cardIndex, 1);
 
   const updatedPlayers = [...gameState.players];
-  updatedPlayers[playerIndex] = { ...player, hand: newHand, hasTakenActionThisTurn: true };
+  updatedPlayers[playerIndex] = {
+    ...player,
+    hand: newHand,
+    hasTakenActionThisTurn: true,
+    hasDiscardedThisTurn: true,
+    restrictedDiscardCard: null,
+  };
 
   const newDiscardPile = [...gameState.discardPile, cardToDiscard];
 
   const updatedGameState: IGameState = {
     ...gameState,
+    status: 'in-progress',
     players: updatedPlayers,
     discardPile: newDiscardPile,
     lastAction: { type: 'discardCard', payload: { userId, card: cardToDiscard } as any, timestamp: Date.now() },
@@ -529,12 +615,20 @@ export const checkReem = (gameState: IGameState, userId: string): boolean => {
  * @returns The updated game state.
  */
 export const playerSpreadCards = async (gameState: IGameState, userId: string, cardsToSpread: Card[]): Promise<IGameState> => {
+  gameState = normalizeTurnTrackingState(gameState);
   const playerIndex = gameState.players.findIndex(p => p.userId === userId);
   if (playerIndex === -1) {
     throw new Error(`Player ${userId} not found.`);
   }
 
+  assertActiveTurnAction(gameState, playerIndex, userId, 'spread');
   const player = gameState.players[playerIndex];
+  if (!player.hasDrawnThisTurn) {
+    throw new Error('You must draw before spreading.');
+  }
+  if (player.hasDiscardedThisTurn) {
+    throw new Error('Turn already ended for this player.');
+  }
   let newHand = [...player.hand];
   let newSpreads = [...player.spreads];
 
@@ -582,6 +676,7 @@ export const playerSpreadCards = async (gameState: IGameState, userId: string, c
 
   let updatedGameState: IGameState = { // Explicitly type updatedGameState
     ...gameState,
+    status: 'in-progress',
     players: updatedPlayers,
     lastAction: { type: 'spread', payload: { userId, cards: cardsToSpread } as any, timestamp: Date.now() },
   };
@@ -651,11 +746,19 @@ export const playerHitSpread = async (
   targetPlayerId: string,
   targetSpreadIndex: number
 ): Promise<IGameState> => {
+  gameState = normalizeTurnTrackingState(gameState);
   const hittingPlayerIndex = gameState.players.findIndex(p => p.userId === hittingPlayerId);
   if (hittingPlayerIndex === -1) {
     throw new Error(`Hitting player ${hittingPlayerId} not found.`);
   }
+  assertActiveTurnAction(gameState, hittingPlayerIndex, hittingPlayerId, 'hit');
   const hittingPlayer = gameState.players[hittingPlayerIndex];
+  if (!hittingPlayer.hasDrawnThisTurn) {
+    throw new Error('You must draw before hitting.');
+  }
+  if (hittingPlayer.hasDiscardedThisTurn) {
+    throw new Error('Turn already ended for this player.');
+  }
 
   const targetPlayerIndex = gameState.players.findIndex(p => p.userId === targetPlayerId);
   if (targetPlayerIndex === -1) {
@@ -709,6 +812,7 @@ export const playerHitSpread = async (
 
   return {
     ...gameState,
+    status: 'in-progress',
     players: updatedPlayers,
     lastAction: { type: 'hit', payload: { hittingPlayerId, card: cardToHitWith, targetPlayerId, targetSpreadIndex } as any, timestamp: Date.now() },
   };
@@ -721,18 +825,17 @@ export const playerHitSpread = async (
  * @returns The updated game state (round ended).
  */
 export const playerDrop = async (gameState: IGameState, userId: string): Promise<IGameState> => {
+  gameState = normalizeTurnTrackingState(gameState);
   const playerIndex = gameState.players.findIndex(p => p.userId === userId);
   if (playerIndex === -1) {
     throw new Error(`Player ${userId} not found.`);
   }
 
+  assertActiveTurnAction(gameState, playerIndex, userId, 'drop');
   const player = gameState.players[playerIndex];
 
   // 1. Validate drop conditions
-  if (gameState.currentPlayerIndex !== playerIndex) {
-    throw new Error(`It is not player ${userId}'s turn to drop.`);
-  }
-  if (player.hasTakenActionThisTurn) {
+  if (player.hasDrawnThisTurn || player.hasTakenActionThisTurn) {
     throw new Error(`Player ${userId} cannot drop after taking an action this turn.`);
   }
   if (player.isHitLocked) {

@@ -22,6 +22,14 @@ const userSchema = new Schema({
       return this.isNew || !!(this as any).passwordHash;
     },
   },
+  passwordResetTokenHash: {
+    type: String,
+    default: null,
+  },
+  passwordResetExpiresAt: {
+    type: Date,
+    default: null,
+  },
   avatarUrl: {
     type: String,
     default: '/avatars/default.svg',

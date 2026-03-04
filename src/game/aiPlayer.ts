@@ -1,6 +1,5 @@
 import { IGameState, calculateHandValue, isValidSpread } from './gameEngine';
 import { Card } from './deck';
-import { CardRank, CardSuit } from './deck';
 
 interface AIPlayerAction {
   type: 'draw' | 'discard' | 'spread' | 'hit' | 'drop' | 'none';
@@ -18,11 +17,32 @@ export const getAIPlayerAction = (gameState: IGameState, aiPlayerId: string): AI
   const aiPlayer = gameState.players.find(p => p.userId === aiPlayerId);
   const currentPlayer = gameState.players[gameState.currentPlayerIndex];
 
-  if (!aiPlayer || currentPlayer.userId !== aiPlayerId) {
+  if (!aiPlayer || !currentPlayer || currentPlayer.userId !== aiPlayerId) {
     return { type: 'none' }; // Not AI's turn or player not found
   }
 
   const aiHand = aiPlayer.hand;
+  const hasDrawnThisTurn = aiPlayer.hasDrawnThisTurn ?? !!aiPlayer.hasTakenActionThisTurn;
+  const hasDiscardedThisTurn = aiPlayer.hasDiscardedThisTurn ?? false;
+
+  // Never intentionally idle: if AI has not drawn yet, either drop or draw.
+  // Spread/hit/discard are only legal after drawing.
+  if (!hasDrawnThisTurn) {
+    if (!aiPlayer.isHitLocked) {
+      const handValue = calculateHandValue(aiHand);
+      // Simple AI: Drop if hand value is low (e.g., <= 5)
+      if (handValue <= 5) {
+        return { type: 'drop' };
+      }
+    }
+
+    // Draw from deck by default; draw on empty deck still triggers deck-empty logic.
+    return { type: 'draw' };
+  }
+
+  if (hasDiscardedThisTurn) {
+    return { type: 'none' };
+  }
 
   // 1. Prioritize Reem (two spreads in one turn)
   // This requires a more complex lookahead, for now, let's just prioritize making one good spread if possible
@@ -55,24 +75,15 @@ export const getAIPlayerAction = (gameState: IGameState, aiPlayerId: string): AI
     }
   }
 
-  // 4. Decide whether to Drop (only if not hit-locked and no action taken)
-  if (!aiPlayer.isHitLocked && !aiPlayer.hasTakenActionThisTurn) {
-    const handValue = calculateHandValue(aiHand);
-    // Simple AI: Drop if hand value is low (e.g., <= 5)
-    if (handValue <= 5) {
-      return { type: 'drop' };
-    }
-  }
-
-  // 5. Draw a card if no other good moves and hasn't drawn yet
-  // Also try to draw if deck is empty to trigger round end logic
-  if (!aiPlayer.hasTakenActionThisTurn && gameState.deck.length >= 0) {
-    return { type: 'draw' };
-  }
-
-  // 6. If nothing else, discard a random card (should always be possible after drawing)
+  // 4. If nothing else, discard a random legal card.
   if (aiHand.length > 0) {
-    const cardToDiscard = aiHand[Math.floor(Math.random() * aiHand.length)];
+    const restrictedCardId = aiPlayer.restrictedDiscardCard ?? null;
+    const discardableCards = aiHand.filter((card) => {
+      const id = `${card.rank}-${card.suit}`;
+      return restrictedCardId === null || id !== restrictedCardId;
+    });
+    const source = discardableCards.length > 0 ? discardableCards : aiHand;
+    const cardToDiscard = source[Math.floor(Math.random() * source.length)];
     return { type: 'discard', payload: { card: cardToDiscard } };
   }
 

@@ -1227,6 +1227,12 @@ const setupSocketHandlers = (io: Server) => {
       if (gameState) {
         try {
           const updatedGameState = await playerHitSpread(gameState, userId, card, targetPlayerId, targetSpreadIndex);
+
+          if (updatedGameState.status === "round-end") {
+            await settleRoundAndBroadcast(io, tableId, updatedGameState);
+            return;
+          }
+
           await saveGameState(updatedGameState);
           io.to(tableId).emit("gameStateUpdate", updatedGameState);
           runTurnLoop(io, tableId, updatedGameState);

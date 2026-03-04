@@ -788,34 +788,61 @@ export const playerHitSpread = async (
   // Perform the hit
   // Remove card from hitting player's hand
   const updatedHittingHand = [...hittingPlayer.hand];
-  updatedHittingHand.splice(cardInHandIndex, 1);
+  const [playedCard] = updatedHittingHand.splice(cardInHandIndex, 1);
+  if (!playedCard) {
+    throw new Error(`Unable to remove card ${cardToHitWith.rank} of ${cardToHitWith.suit} from player ${hittingPlayerId}'s hand.`);
+  }
 
   // Add card to target spread
-  const updatedTargetSpread = [...targetSpread, cardToHitWith].sort((a, b) => getCardNumericalRank(a.rank) - getCardNumericalRank(b.rank));
+  const updatedTargetSpread = [...targetSpread, playedCard].sort((a, b) => getCardNumericalRank(a.rank) - getCardNumericalRank(b.rank));
   const updatedTargetPlayerSpreads = [...targetPlayer.spreads];
   updatedTargetPlayerSpreads[targetSpreadIndex] = updatedTargetSpread;
 
-  // Update hit lock for the target player
-  const newHitLockCounter = targetPlayer.hitLockCounter + (targetPlayer.isHitLocked ? 1 : 2);
-  targetPlayer = {
-    ...targetPlayer,
-    spreads: updatedTargetPlayerSpreads,
-    isHitLocked: true,
-    hitLockCounter: newHitLockCounter,
-  };
-
-  const updatedHittingPlayer = { ...hittingPlayer, hand: updatedHittingHand, hasTakenActionThisTurn: true };
-
   const updatedPlayers = [...gameState.players];
-  updatedPlayers[hittingPlayerIndex] = updatedHittingPlayer;
-  updatedPlayers[targetPlayerIndex] = targetPlayer;
+  if (hittingPlayerIndex === targetPlayerIndex) {
+    // When a player hits their own spread, merge both updates into one player record.
+    const newHitLockCounter = targetPlayer.hitLockCounter + (targetPlayer.isHitLocked ? 1 : 2);
+    updatedPlayers[hittingPlayerIndex] = {
+      ...hittingPlayer,
+      hand: updatedHittingHand,
+      spreads: updatedTargetPlayerSpreads,
+      isHitLocked: true,
+      hitLockCounter: newHitLockCounter,
+      hasTakenActionThisTurn: true,
+    };
+  } else {
+    const newHitLockCounter = targetPlayer.hitLockCounter + (targetPlayer.isHitLocked ? 1 : 2);
+    targetPlayer = {
+      ...targetPlayer,
+      spreads: updatedTargetPlayerSpreads,
+      isHitLocked: true,
+      hitLockCounter: newHitLockCounter,
+    };
 
-  return {
+    const updatedHittingPlayer = { ...hittingPlayer, hand: updatedHittingHand, hasTakenActionThisTurn: true };
+    updatedPlayers[hittingPlayerIndex] = updatedHittingPlayer;
+    updatedPlayers[targetPlayerIndex] = targetPlayer;
+  }
+
+  const updatedGameState: IGameState = {
     ...gameState,
     status: 'in-progress',
     players: updatedPlayers,
-    lastAction: { type: 'hit', payload: { hittingPlayerId, card: cardToHitWith, targetPlayerId, targetSpreadIndex } as any, timestamp: Date.now() },
+    lastAction: { type: 'hit', payload: { hittingPlayerId, card: playedCard, targetPlayerId, targetSpreadIndex } as any, timestamp: Date.now() },
   };
+
+  if (updatedHittingHand.length === 0) {
+    const roundEndState: IGameState = {
+      ...updatedGameState,
+      status: 'round-end',
+      roundEndedBy: 'REGULAR',
+      roundWinnerId: hittingPlayerId,
+      handScores: calculateAllHandScores(updatedPlayers),
+    };
+    return finalizeRoundState(roundEndState);
+  }
+
+  return updatedGameState;
 };
 
 /**

@@ -6,6 +6,7 @@ import User from '../models/User';
 import { generateToken } from '../utils/jwt';
 import { ITokenPayload } from '../utils/jwt'; // Import ITokenPayload
 import { ensureWalletForUser } from '../services/walletProvisioningService';
+import { resolveUserRole, roleAtLeast } from '../constants/roles';
 
 dotenv.config();
 
@@ -51,6 +52,7 @@ router.post('/register', async (req: Request, res: Response) => {
     const { username, email, password } = req.body;
     const normalizedEmail = normalizeEmail(email);
     const isBootstrapAdmin = typeof normalizedEmail === 'string' && ADMIN_EMAILS.has(normalizedEmail);
+    const role = isBootstrapAdmin ? 'superadmin' : 'user';
 
     // Check if user already exists
     let user = await User.findOne({ $or: [{ username }, { email: normalizedEmail }] });
@@ -67,7 +69,7 @@ router.post('/register', async (req: Request, res: Response) => {
       username,
       email: normalizedEmail,
       passwordHash,
-      isAdmin: isBootstrapAdmin,
+      role,
     });
     await user.save();
 
@@ -78,7 +80,8 @@ router.post('/register', async (req: Request, res: Response) => {
       id: user._id.toString(),
       username: user.username,
       email: user.email,
-      isAdmin: user.isAdmin ?? false,
+      role: resolveUserRole(user.role, !!user.isAdmin),
+      isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
     };
     const token = generateToken(tokenPayload);
 
@@ -89,7 +92,8 @@ router.post('/register', async (req: Request, res: Response) => {
       username: user.username,
       email: user.email,
       avatarUrl: user.avatarUrl,
-      isAdmin: user.isAdmin ?? false,
+      role: resolveUserRole(user.role, !!user.isAdmin),
+      isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
     });
   } catch (error) {
     console.error(error);
@@ -108,8 +112,9 @@ router.post('/login', async (req: Request, res: Response) => {
     if (!user) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
-    if (!user.isAdmin && ADMIN_EMAILS.has(user.email.toLowerCase())) {
-      user.isAdmin = true;
+    const currentRole = resolveUserRole(user.role, !!user.isAdmin);
+    if (currentRole === 'user' && ADMIN_EMAILS.has(user.email.toLowerCase())) {
+      user.role = 'superadmin';
       await user.save();
     }
 
@@ -129,7 +134,8 @@ router.post('/login', async (req: Request, res: Response) => {
       id: user._id.toString(),
       username: user.username,
       email: user.email,
-      isAdmin: user.isAdmin ?? false,
+      role: resolveUserRole(user.role, !!user.isAdmin),
+      isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
     };
     const token = generateToken(tokenPayload);
 
@@ -140,7 +146,8 @@ router.post('/login', async (req: Request, res: Response) => {
       username: user.username,
       email: user.email,
       avatarUrl: user.avatarUrl,
-      isAdmin: user.isAdmin ?? false,
+      role: resolveUserRole(user.role, !!user.isAdmin),
+      isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
     });
   } catch (error) {
     console.error(error);

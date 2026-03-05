@@ -1,4 +1,5 @@
 import { Schema, model, HydratedDocument, InferSchemaType } from 'mongoose';
+import { USER_ROLES, resolveUserRole, isAdminRole } from '../constants/roles';
 
 const userSchema = new Schema({
   username: {
@@ -34,6 +35,29 @@ const userSchema = new Schema({
     type: String,
     default: '/avatars/default.svg',
   },
+  role: {
+    type: String,
+    enum: USER_ROLES,
+    required: true,
+    default: 'user',
+    index: true,
+  },
+  isBanned: {
+    type: Boolean,
+    required: true,
+    default: false,
+    index: true,
+  },
+  isFrozen: {
+    type: Boolean,
+    required: true,
+    default: false,
+    index: true,
+  },
+  adminNotes: {
+    type: [String],
+    default: [],
+  },
   isAdmin: {
     type: Boolean,
     required: true,
@@ -41,6 +65,16 @@ const userSchema = new Schema({
   },
 }, {
   timestamps: true,
+});
+
+userSchema.pre('validate', function syncLegacyRoleFields() {
+  const user = this as any;
+  user.role = resolveUserRole(user.role, !!user.isAdmin);
+  user.isAdmin = isAdminRole(user.role);
+
+  if (!Array.isArray(user.adminNotes)) {
+    user.adminNotes = [];
+  }
 });
 
 userSchema.virtual('id').get(function() {

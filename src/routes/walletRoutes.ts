@@ -3,11 +3,9 @@ import { ITokenPayload } from '../utils/jwt';
 import WithdrawalRequest from '../models/WithdrawalRequest';
 import Transaction from '../models/Transaction';
 import authMiddleware from '../middleware/auth';
-import adminMiddleware from '../middleware/admin';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { FinancialService } from '../services/financialService';
-import { logLedgerEntry } from '../services/ledgerService';
 import { ensureWalletForUser } from '../services/walletProvisioningService';
 
 dotenv.config();
@@ -153,112 +151,6 @@ router.get('/my-withdrawals', authMiddleware, async (req: Request, res: Response
     res.status(200).json(withdrawalRequests);
   } catch (error) {
     console.error('Error fetching withdrawal requests:', error);
-    res.status(500).json({ message: 'Internal server error.' });
-  }
-});
-
-// Admin: Get all pending withdrawals
-router.get('/admin/withdrawals', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
-  try {
-    const withdrawalRequests = await WithdrawalRequest.find({ status: 'pending' }).populate('userId', 'username email').sort({ requestedAt: 1 });
-    res.status(200).json(withdrawalRequests);
-  } catch (error) {
-    console.error('Error fetching admin withdrawals:', error);
-    res.status(500).json({ message: 'Internal server error.' });
-  }
-});
-
-// Admin: Process withdrawal
-router.post('/admin/withdrawals/:id/process', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { action, transactionId } = req.body; // action: 'approve' | 'reject'
-
-  if (!['approve', 'reject'].includes(action)) {
-    return res.status(400).json({ message: 'Invalid action.' });
-  }
-
-  try {
-    const request = await WithdrawalRequest.findById(id);
-    if (!request) {
-      return res.status(404).json({ message: 'Request not found.' });
-    }
-
-    if (request.status !== 'pending') {
-      return res.status(400).json({ message: 'Request is not pending.' });
-    }
-
-    const wallet = await ensureWalletForUser(request.userId as mongoose.Types.ObjectId);
-    if (!wallet) {
-      return res.status(404).json({ message: 'User wallet not found.' });
-    }
-
-    if (action === 'approve') {
-      request.status = 'approved';
-      request.processedAt = new Date();
-      request.transactionId = transactionId || 'MANUAL';
-      
-      // Funds were already deducted from available balance, but kept in pending.
-      // Now we just reduce pending.
-      wallet.pendingWithdrawals -= request.amount;
-      wallet.lifetimeWithdrawals += request.amount;
-
-      // Update the transaction status
-      await Transaction.findOneAndUpdate(
-        { "details.withdrawalRequestId": request._id },
-        { status: 'Completed' }
-      );
-
-      await logLedgerEntry({
-        userId: request.userId,
-        currency: 'USD',
-        eventType: 'USD_WITHDRAWAL',
-        direction: 'debit',
-        amount: request.amount,
-        status: 'completed',
-        balanceAfter: wallet.usdBalance,
-        referenceType: 'withdrawal_request',
-        referenceId: request._id.toString(),
-        metadata: {
-          action: 'approve',
-          transactionId: request.transactionId,
-        },
-      });
-    } else {
-      request.status = 'rejected';
-      request.processedAt = new Date();
-      
-      // Refund the amount to available balance
-      wallet.pendingWithdrawals -= request.amount;
-      wallet.availableBalance += request.amount;
-
-      // Update the transaction status
-      await Transaction.findOneAndUpdate(
-        { "details.withdrawalRequestId": request._id },
-        { status: 'Failed' }
-      );
-
-      await logLedgerEntry({
-        userId: request.userId,
-        currency: 'USD',
-        eventType: 'USD_WITHDRAWAL',
-        direction: 'credit',
-        amount: request.amount,
-        status: 'failed',
-        balanceAfter: wallet.usdBalance,
-        referenceType: 'withdrawal_request',
-        referenceId: request._id.toString(),
-        metadata: {
-          action: 'reject',
-        },
-      });
-    }
-
-    await request.save();
-    await wallet.save();
-
-    res.status(200).json({ message: `Withdrawal ${action}ed successfully.` });
-  } catch (error) {
-    console.error('Error processing withdrawal:', error);
     res.status(500).json({ message: 'Internal server error.' });
   }
 });

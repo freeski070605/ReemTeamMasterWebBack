@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
+import { UserRole } from '../constants/roles';
 
 dotenv.config();
 
@@ -10,6 +11,7 @@ export interface ITokenPayload {
   id: string;
   username: string;
   email: string;
+  role?: UserRole;
   isAdmin?: boolean;
 }
 

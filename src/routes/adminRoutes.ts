@@ -28,6 +28,11 @@ const router = Router();
 const MAX_USER_SEARCH_RESULTS = 50;
 const MAX_ADMIN_NOTE_LENGTH = 500;
 const MAX_BALANCE_ADJUSTMENT = 100_000;
+const TABLE_STATUS_FILTERS = ['all', 'in-game', 'waiting'] as const;
+const ADMIN_WALLET_ADJUST_CURRENCIES = ['USD', 'RTC'] as const;
+
+type TableStatusFilter = typeof TABLE_STATUS_FILTERS[number];
+type AdminWalletAdjustCurrency = typeof ADMIN_WALLET_ADJUST_CURRENCIES[number];
 
 const isObjectId = (value: string): boolean => mongoose.Types.ObjectId.isValid(value);
 
@@ -38,6 +43,27 @@ const getRouteParam = (value: string | string[] | undefined): string => {
     return value[0] ?? '';
   }
   return value ?? '';
+};
+
+const buildUserSearchQuery = (query: string) => {
+  if (!query) {
+    return {};
+  }
+
+  return {
+    $or: [
+      { username: { $regex: query, $options: 'i' } },
+      { email: { $regex: query, $options: 'i' } },
+    ],
+  };
+};
+
+const isTableStatusFilter = (value: unknown): value is TableStatusFilter => {
+  return typeof value === 'string' && TABLE_STATUS_FILTERS.includes(value as TableStatusFilter);
+};
+
+const isAdminWalletAdjustCurrency = (value: unknown): value is AdminWalletAdjustCurrency => {
+  return typeof value === 'string' && ADMIN_WALLET_ADJUST_CURRENCIES.includes(value as AdminWalletAdjustCurrency);
 };
 
 const toSafeAmount = (value: unknown, field: string): number => {
@@ -105,6 +131,52 @@ const serializeWithdrawal = (request: any) => ({
   processedBy: request.processedBy?.toString?.(),
 });
 
+const serializeAdminTable = async (table: any) => {
+  const tableId = table._id.toString();
+  const gameState = await loadGameState(tableId);
+  const currentPlayer = gameState?.players?.[gameState.currentPlayerIndex];
+  const turnTimeRemainingMs = gameState
+    ? Math.max(0, (gameState.turnExpiresAt ?? Date.now()) - Date.now())
+    : null;
+
+  return {
+    tableId,
+    name: table.name,
+    mode: table.mode,
+    stake: table.stake,
+    status: table.status,
+    minPlayers: table.minPlayers,
+    maxPlayers: table.maxPlayers,
+    currentPlayerCount: table.currentPlayerCount,
+    activeContestId: table.activeContestId ?? null,
+    currentMatchId: table.currentMatchId?.toString?.() ?? null,
+    playersSeated: gameState
+      ? gameState.players.map((player) => ({
+          userId: player.userId,
+          username: player.username,
+          isAI: player.isAI,
+        }))
+      : table.players.map((player: any) => ({
+          userId: player.userId.toString(),
+          username: player.isAI ? `AI_${player.userId.toString().slice(-4)}` : `User_${player.userId.toString().slice(-6)}`,
+          isAI: player.isAI,
+        })),
+    currentPot: gameState?.pot ?? null,
+    turnState: gameState
+      ? {
+          status: gameState.status,
+          turn: gameState.turn,
+          currentPlayerId: currentPlayer?.userId ?? null,
+          currentPlayerUsername: currentPlayer?.username ?? null,
+          turnExpiresAt: gameState.turnExpiresAt ?? null,
+          turnTimeRemainingMs,
+        }
+      : null,
+    createdAt: table.createdAt,
+    updatedAt: table.updatedAt,
+  };
+};
+
 const appendAdminNote = (user: any, note: string | undefined, actorName: string) => {
   const trimmed = typeof note === 'string' ? note.trim() : '';
   if (!trimmed) {
@@ -143,14 +215,7 @@ router.use(adminRateLimiter);
 router.get('/users/search', requireAdmin, async (req: Request, res: Response) => {
   try {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
-    const query = q.length > 0
-      ? {
-          $or: [
-            { username: { $regex: q, $options: 'i' } },
-            { email: { $regex: q, $options: 'i' } },
-          ],
-        }
-      : {};
+    const query = buildUserSearchQuery(q);
 
     const users = await User.find(query)
       .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt')
@@ -386,6 +451,35 @@ router.patch(
   }
 );
 
+router.get('/wallets/search', requireFinance, async (req: Request, res: Response) => {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const query = buildUserSearchQuery(q);
+    const users = await User.find(query)
+      .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt')
+      .sort({ createdAt: -1 })
+      .limit(MAX_USER_SEARCH_RESULTS);
+
+    const results = await Promise.all(
+      users.map(async (user) => {
+        const wallet = await ensureWalletForUser(user._id);
+        return {
+          user: serializeUser(user),
+          wallet: serializeWallet(wallet),
+        };
+      })
+    );
+
+    return res.status(200).json({
+      query: q,
+      total: results.length,
+      results,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ message: error?.message || 'Failed to search wallets.' });
+  }
+});
+
 router.get('/wallets/:userId', requireFinance, async (req: Request, res: Response) => {
   try {
     const userId = getRouteParam(req.params.userId);
@@ -427,6 +521,7 @@ router.post(
       return wallet
         ? {
             usdBalance: wallet.usdBalance,
+            rtcBalance: wallet.rtcBalance,
             availableBalance: wallet.availableBalance,
             pendingWithdrawals: wallet.pendingWithdrawals,
             lifetimeDeposits: wallet.lifetimeDeposits,
@@ -447,6 +542,11 @@ router.post(
       const userId = typeof req.body?.userId === 'string' ? req.body.userId : '';
       const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
       const amount = toSafeAmount(req.body?.amount, 'amount');
+      const currencyRaw = typeof req.body?.currency === 'string' ? req.body.currency.trim().toUpperCase() : 'USD';
+      if (!isAdminWalletAdjustCurrency(currencyRaw)) {
+        return res.status(400).json({ message: `currency must be one of: ${ADMIN_WALLET_ADJUST_CURRENCIES.join(', ')}` });
+      }
+      const currency = currencyRaw;
 
       if (!isObjectId(userId)) {
         return res.status(400).json({ message: 'userId is required and must be a valid ObjectId.' });
@@ -470,17 +570,25 @@ router.post(
       }
 
       const wallet = await ensureWalletForUser(userId);
-      const nextUsdBalance = Math.round((wallet.usdBalance + amount) * 100) / 100;
-      if (nextUsdBalance < 0) {
-        return res.status(400).json({ message: 'Adjustment would result in a negative USD balance.' });
-      }
+      if (currency === 'USD') {
+        const nextUsdBalance = Math.round((wallet.usdBalance + amount) * 100) / 100;
+        if (nextUsdBalance < 0) {
+          return res.status(400).json({ message: 'Adjustment would result in a negative USD balance.' });
+        }
 
-      wallet.usdBalance = nextUsdBalance;
-      wallet.availableBalance = nextUsdBalance;
-      if (amount > 0) {
-        wallet.lifetimeDeposits = Math.round((wallet.lifetimeDeposits + amount) * 100) / 100;
+        wallet.usdBalance = nextUsdBalance;
+        wallet.availableBalance = nextUsdBalance;
+        if (amount > 0) {
+          wallet.lifetimeDeposits = Math.round((wallet.lifetimeDeposits + amount) * 100) / 100;
+        } else {
+          wallet.lifetimeWithdrawals = Math.round((wallet.lifetimeWithdrawals + Math.abs(amount)) * 100) / 100;
+        }
       } else {
-        wallet.lifetimeWithdrawals = Math.round((wallet.lifetimeWithdrawals + Math.abs(amount)) * 100) / 100;
+        const nextRtcBalance = Math.round((wallet.rtcBalance + amount) * 100) / 100;
+        if (nextRtcBalance < 0) {
+          return res.status(400).json({ message: 'Adjustment would result in a negative RTC balance.' });
+        }
+        wallet.rtcBalance = nextRtcBalance;
       }
       await wallet.save();
 
@@ -488,29 +596,38 @@ router.post(
         userId: user._id,
         type: amount >= 0 ? 'Deposit' : 'Withdrawal',
         amount,
-        currency: 'USD',
+        currency,
         status: 'Completed',
         details: {
           paymentId: 'ADMIN_ADJUSTMENT',
           adminUserId: actor.id,
           reason,
+          currency,
         },
       });
       await transaction.save();
 
       await logLedgerEntry({
         userId: user._id,
-        currency: 'USD',
-        eventType: amount >= 0 ? 'USD_DEPOSIT' : 'USD_WITHDRAWAL',
+        currency,
+        eventType:
+          currency === 'USD'
+            ? amount >= 0
+              ? 'USD_DEPOSIT'
+              : 'USD_WITHDRAWAL'
+            : amount >= 0
+              ? 'SYSTEM_MINT'
+              : 'SYSTEM_BURN',
         direction: amount >= 0 ? 'credit' : 'debit',
         amount: Math.abs(amount),
         status: 'completed',
-        balanceAfter: wallet.usdBalance,
+        balanceAfter: currency === 'USD' ? wallet.usdBalance : wallet.rtcBalance,
         referenceType: 'admin_adjustment',
         referenceId: transaction._id.toString(),
         metadata: {
           reason,
           adminUserId: actor.id,
+          currency,
           direction: amount >= 0 ? 'credit' : 'debit',
         },
       });
@@ -518,10 +635,13 @@ router.post(
       res.locals.auditTargetId = wallet._id.toString();
       res.locals.auditAfterState = {
         usdBalance: wallet.usdBalance,
+        rtcBalance: wallet.rtcBalance,
         availableBalance: wallet.availableBalance,
         pendingWithdrawals: wallet.pendingWithdrawals,
         lifetimeDeposits: wallet.lifetimeDeposits,
         lifetimeWithdrawals: wallet.lifetimeWithdrawals,
+        adjustmentCurrency: currency,
+        adjustmentAmount: amount,
         transactionId: transaction._id.toString(),
       };
 
@@ -730,52 +850,42 @@ router.patch(
   }
 );
 
+router.get('/tables', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const requestedStatus = typeof req.query.status === 'string'
+      ? req.query.status.trim().toLowerCase()
+      : 'all';
+    if (!isTableStatusFilter(requestedStatus)) {
+      return res.status(400).json({
+        message: `status must be one of: ${TABLE_STATUS_FILTERS.join(', ')}`,
+      });
+    }
+
+    const tableQuery = requestedStatus === 'all' ? {} : { status: requestedStatus };
+    const tables = await Table.find(tableQuery).sort({ updatedAt: -1, createdAt: -1 });
+    const serialized = await Promise.all(tables.map((table) => serializeAdminTable(table)));
+    const liveCount = serialized.filter((table) => table.status === 'in-game').length;
+
+    return res.status(200).json({
+      status: requestedStatus,
+      total: serialized.length,
+      liveCount,
+      waitingCount: serialized.length - liveCount,
+      tables: serialized,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ message: error?.message || 'Failed to fetch tables.' });
+  }
+});
+
 router.get('/tables/live', requireAdmin, async (_req: Request, res: Response) => {
   try {
     const tables = await Table.find({ status: 'in-game' }).sort({ updatedAt: -1, createdAt: -1 });
-
-    const live = await Promise.all(tables.map(async (table) => {
-      const gameState = await loadGameState(table._id.toString());
-      const currentPlayer = gameState?.players?.[gameState.currentPlayerIndex];
-      const turnTimeRemainingMs = gameState
-        ? Math.max(0, (gameState.turnExpiresAt ?? Date.now()) - Date.now())
-        : null;
-
-      return {
-        tableId: table._id.toString(),
-        name: table.name,
-        mode: table.mode,
-        stake: table.stake,
-        status: table.status,
-        activeContestId: table.activeContestId ?? null,
-        playersSeated: gameState
-          ? gameState.players.map((player) => ({
-              userId: player.userId,
-              username: player.username,
-              isAI: player.isAI,
-            }))
-          : table.players.map((player) => ({
-              userId: player.userId.toString(),
-              username: player.isAI ? `AI_${player.userId.toString().slice(-4)}` : 'Player',
-              isAI: player.isAI,
-            })),
-        currentPot: gameState?.pot ?? null,
-        turnState: gameState
-          ? {
-              status: gameState.status,
-              turn: gameState.turn,
-              currentPlayerId: currentPlayer?.userId ?? null,
-              currentPlayerUsername: currentPlayer?.username ?? null,
-              turnExpiresAt: gameState.turnExpiresAt ?? null,
-              turnTimeRemainingMs,
-            }
-          : null,
-      };
-    }));
+    const serialized = await Promise.all(tables.map((table) => serializeAdminTable(table)));
 
     return res.status(200).json({
-      total: live.length,
-      tables: live,
+      total: serialized.length,
+      tables: serialized,
     });
   } catch (error: any) {
     return res.status(500).json({ message: error?.message || 'Failed to fetch live tables.' });

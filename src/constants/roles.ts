@@ -36,5 +36,4 @@ export const isFinanceRole = (role: UserRole): boolean => {
   return roleAtLeast(role, 'finance');
 };
 
-export const hasAdminTabAccess = (role: UserRole): boolean => role !== 'user';
-
+export const hasAdminTabAccess = (role: UserRole): boolean => isFinanceRole(role);

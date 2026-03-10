@@ -7,6 +7,7 @@ import { generateToken } from '../utils/jwt';
 import { ITokenPayload } from '../utils/jwt'; // Import ITokenPayload
 import { ensureWalletForUser } from '../services/walletProvisioningService';
 import { resolveUserRole, roleAtLeast } from '../constants/roles';
+import { sendPasswordResetEmail } from '../utils/email';
 
 dotenv.config();
 
@@ -158,6 +159,7 @@ router.post('/login', async (req: Request, res: Response) => {
 router.post('/forgot-password', async (req: Request, res: Response) => {
   try {
     const normalizedEmail = normalizeEmail(req.body?.email);
+    let devResetLink: string | null = null;
 
     if (!normalizedEmail) {
       return res.status(200).json({ message: PASSWORD_RESET_REQUEST_MESSAGE });
@@ -172,21 +174,24 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
       await user.save();
 
       const resetLink = `${getFrontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
+      const emailResult = await sendPasswordResetEmail(normalizedEmail, resetLink);
+
+      if (!emailResult.sent) {
+        console.warn(
+          `[auth] Password reset email not sent for ${normalizedEmail} (${emailResult.reason ?? 'unknown reason'}).`
+        );
+      }
 
       if (process.env.NODE_ENV !== 'production') {
         console.log(`[auth] Password reset link for ${normalizedEmail}: ${resetLink}`);
-        return res.status(200).json({
-          message: PASSWORD_RESET_REQUEST_MESSAGE,
-          resetLink,
-        });
+        devResetLink = resetLink;
       }
-
-      console.log(
-        `[auth] Password reset requested for ${normalizedEmail}. Configure email delivery for reset links.`
-      );
     }
 
-    return res.status(200).json({ message: PASSWORD_RESET_REQUEST_MESSAGE });
+    return res.status(200).json({
+      message: PASSWORD_RESET_REQUEST_MESSAGE,
+      ...(process.env.NODE_ENV !== 'production' && devResetLink ? { resetLink: devResetLink } : {}),
+    });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ message: 'Server error' });

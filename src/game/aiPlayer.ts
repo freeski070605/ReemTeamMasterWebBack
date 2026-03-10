@@ -2,7 +2,7 @@ import { IGameState, calculateHandValue, isValidSpread } from './gameEngine';
 import { Card } from './deck';
 
 interface AIPlayerAction {
-  type: 'draw' | 'discard' | 'spread' | 'hit' | 'drop' | 'none';
+  type: 'draw' | 'discard' | 'spread' | 'hit' | 'drop' | 'declare41' | 'none';
   payload?: any; // Specific data for the action
 }
 
@@ -28,6 +28,14 @@ export const getAIPlayerAction = (gameState: IGameState, aiPlayerId: string): AI
   // Never intentionally idle: if AI has not drawn yet, either drop or draw.
   // Spread/hit/discard are only legal after drawing.
   if (!hasDrawnThisTurn) {
+    if (
+      !aiPlayer.hasDrawnAnyCard &&
+      aiPlayer.startingHandValue === 41 &&
+      calculateHandValue(aiHand) === 41
+    ) {
+      return { type: 'declare41' };
+    }
+
     if (!aiPlayer.isHitLocked) {
       const handValue = calculateHandValue(aiHand);
       // Simple AI: Drop if hand value is low (e.g., <= 5)

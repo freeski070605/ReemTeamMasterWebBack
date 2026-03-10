@@ -42,6 +42,9 @@ export interface IGameState {
     hasTakenActionThisTurn: boolean; // To track if any action (draw, spread, hit) was taken
     hasDrawnThisTurn: boolean;
     hasDiscardedThisTurn: boolean;
+    hasDrawnAnyCard: boolean; // Tracks whether the player has drawn at least once this round
+    startingHandValue: number;
+    lastHitAppliedOnTurn: number | null; // Prevents multiple hits in the same turn from stacking lock
     currentBuyIn: number; // Player's buy-in for the current round
     restrictedDiscardCard: string | null; // Card that cannot be discarded this turn (e.g. if picked from discard pile)
   }>;
@@ -77,7 +80,7 @@ export interface IGameState {
 
 /**
  * Calculates the total value of a player's hand.
- * Ace = 1, 2-7 = face value, J/Q/K = 10.
+ * Ace = 1, 2-10 = face value, J/Q/K = 10.
  * @param hand The player's hand.
  * @returns The total hand value.
  */
@@ -116,28 +119,25 @@ const getLowestScoreWinnerId = (
 };
 
 /**
- * Checks for automatic win conditions (50, 47, 41, or <=11) after dealing.
+ * Checks for automatic opening wins after dealing.
+ * Only 11 and under is instant; 41 must be declared at start of player's turn.
  * @param players The players in the game with their dealt hands.
- * @returns The userId of the winning player and the multiplier, or null if no auto-win.
+ * @returns The userId of the winning player and win type, or null if no auto-win.
  */
-export const checkForAutomaticWins = (players: Array<{ userId: string; hand: Card[] }>): { winnerId: string; type: 'REGULAR' | 'AUTO_TRIPLE' } | null => {
-  let autoWin: { winnerId: string; type: 'REGULAR' | 'AUTO_TRIPLE' } | null = null;
-  let hasAutoTriple = false;
+export const checkForAutomaticWins = (players: Array<{ userId: string; hand: Card[] }>): { winnerId: string; type: 'AUTO_TRIPLE' } | null => {
+  const eligiblePlayers = players
+    .map((player) => ({ userId: player.userId, handValue: calculateHandValue(player.hand) }))
+    .filter((player) => player.handValue <= 11)
+    .sort((a, b) => a.handValue - b.handValue);
 
-  for (const player of players) {
-    const handValue = calculateHandValue(player.hand);
-
-    if (handValue === 41 || handValue <= 11) {
-      // If a triple win is found, it takes precedence
-      autoWin = { winnerId: player.userId, type: 'AUTO_TRIPLE' };
-      hasAutoTriple = true;
-      break; // Exit loop once a triple win is found
-    } else if ((handValue === 50 || handValue === 47) && !hasAutoTriple) {
-      // Regular auto win, only considered if no triple win has been found yet
-      autoWin = { winnerId: player.userId, type: 'REGULAR' };
-    }
+  if (eligiblePlayers.length === 0) {
+    return null;
   }
-  return autoWin;
+
+  return {
+    winnerId: eligiblePlayers[0].userId,
+    type: 'AUTO_TRIPLE',
+  };
 };
 
 /**
@@ -244,6 +244,9 @@ const normalizeTurnTrackingState = (gameState: IGameState): IGameState => {
     ...player,
     hasDrawnThisTurn: player.hasDrawnThisTurn ?? !!player.hasTakenActionThisTurn,
     hasDiscardedThisTurn: player.hasDiscardedThisTurn ?? false,
+    hasDrawnAnyCard: player.hasDrawnAnyCard ?? false,
+    startingHandValue: player.startingHandValue ?? calculateHandValue(player.hand),
+    lastHitAppliedOnTurn: player.lastHitAppliedOnTurn ?? null,
     restrictedDiscardCard: player.restrictedDiscardCard ?? null,
   }));
 
@@ -285,23 +288,31 @@ export const initializeGame = async (
 ): Promise<IGameState> => {
   const fullDeck = createDeck();
   const shuffledDeck = shuffleDeck(fullDeck);
-  const { remainingDeck, playerHands } = dealCards(shuffledDeck, players.length, 5);
+  const { remainingDeck: dealtDeck, playerHands } = dealCards(shuffledDeck, players.length, 5);
+  const remainingDeck = [...dealtDeck];
+  const openingDiscardCard = remainingDeck.shift();
 
-  const initialPlayersState = players.map((player, index) => ({
-    userId: player.userId.toString(),
-    username: player.username,
-    avatarUrl: player.avatarUrl,
-    hand: playerHands[index],
-    isAI: player.isAI,
-    isHitLocked: false,
-    hitLockCounter: 0,
-    spreads: [],
-    hasTakenActionThisTurn: false,
-    hasDrawnThisTurn: false,
-    hasDiscardedThisTurn: false,
-    currentBuyIn: 0, // Initial buy-in is 0, handled by handleBuyIn
-    restrictedDiscardCard: null,
-  }));
+  const initialPlayersState = players.map((player, index) => {
+    const hand = playerHands[index];
+    return {
+      userId: player.userId.toString(),
+      username: player.username,
+      avatarUrl: player.avatarUrl,
+      hand,
+      isAI: player.isAI,
+      isHitLocked: false,
+      hitLockCounter: 0,
+      spreads: [],
+      hasTakenActionThisTurn: false,
+      hasDrawnThisTurn: false,
+      hasDiscardedThisTurn: false,
+      hasDrawnAnyCard: false,
+      startingHandValue: calculateHandValue(hand),
+      lastHitAppliedOnTurn: null,
+      currentBuyIn: 0, // Initial buy-in is 0, handled by handleBuyIn
+      restrictedDiscardCard: null,
+    };
+  });
 
   const dealerIndex = options?.dealerIndex !== undefined
     ? ((options.dealerIndex % players.length) + players.length) % players.length
@@ -317,7 +328,7 @@ export const initializeGame = async (
     currentDealerIndex: dealerIndex, // Rotates clockwise between rounds
     players: initialPlayersState,
     deck: remainingDeck,
-    discardPile: [],
+    discardPile: openingDiscardCard ? [openingDiscardCard] : [],
     turn: 1,
     currentPlayerIndex: firstTurnPlayerIndex, // Start with player clockwise from dealer
     turnStartTime,
@@ -387,18 +398,25 @@ export const loadGameState = async (tableId: string): Promise<IGameState | null>
  * @returns The updated game state.
  */
 export const nextTurn = (gameState: IGameState): IGameState => {
+  const endedTurnPlayerIndex = gameState.currentPlayerIndex;
   const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
   const turnDurationMs = gameState.turnDurationMs ?? DEFAULT_TURN_DURATION_MS;
   const turnStartTime = Date.now();
-  const updatedPlayers = gameState.players.map((player) => ({
-    ...player,
-    hasTakenActionThisTurn: false, // Reset for new turn
-    hasDrawnThisTurn: false,
-    hasDiscardedThisTurn: false,
-    hitLockCounter: Math.max(0, player.hitLockCounter - 1),
-    isHitLocked: player.hitLockCounter > 0,
-    restrictedDiscardCard: null,
-  }));
+  const updatedPlayers = gameState.players.map((player, index) => {
+    const decrementedLockCounter = index === endedTurnPlayerIndex
+      ? Math.max(0, player.hitLockCounter - 1)
+      : player.hitLockCounter;
+
+    return {
+      ...player,
+      hasTakenActionThisTurn: false, // Reset for new turn
+      hasDrawnThisTurn: false,
+      hasDiscardedThisTurn: false,
+      hitLockCounter: decrementedLockCounter,
+      isHitLocked: decrementedLockCounter > 0,
+      restrictedDiscardCard: null,
+    };
+  });
 
   return {
     ...gameState,
@@ -478,8 +496,29 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
     hasTakenActionThisTurn: true,
     hasDrawnThisTurn: true,
     hasDiscardedThisTurn: false,
+    hasDrawnAnyCard: true,
     restrictedDiscardCard: restrictedDiscardCard
   };
+
+  if (source === 'deck' && newDeck.length === 0) {
+    const { winnerId, lowestScore } = getLowestScoreWinnerId(updatedPlayers);
+    const roundEndState: IGameState = {
+      ...gameState,
+      status: 'round-end',
+      deck: newDeck,
+      discardPile: newDiscardPile,
+      players: updatedPlayers,
+      roundEndedBy: 'DECK_EMPTY',
+      roundWinnerId: winnerId,
+      lastAction: {
+        type: 'deckEmpty',
+        payload: { winnerId, lowestScore, exhaustedOnDraw: true } as any,
+        timestamp: Date.now(),
+      },
+      handScores: calculateAllHandScores(updatedPlayers),
+    };
+    return finalizeRoundState(roundEndState);
+  }
 
   return {
     ...gameState,
@@ -514,6 +553,10 @@ export const playerDiscardCard = async (gameState: IGameState, userId: string, c
     throw new Error('You already discarded this turn.');
   }
   const newHand = [...player.hand];
+  const mandatorySpread = findFirstMandatorySpread(player.hand);
+  if (mandatorySpread) {
+    throw new Error('You must play available spreads before discarding. Only all-Ace spreads may be held.');
+  }
 
   // Check if the card is restricted
   const cardId = `${cardToDiscard.rank}-${cardToDiscard.suit}`;
@@ -563,8 +606,53 @@ export const playerDiscardCard = async (gameState: IGameState, userId: string, c
 
 // Helper to get card value for sorting and sequence checking
 const getCardNumericalRank = (rank: CardRank): number => {
-  const ranks = ['Ace', '2', '3', '4', '5', '6', '7', 'Jack', 'Queen', 'King'];
+  const ranks = ['Ace', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'Jack', 'Queen', 'King'];
   return ranks.indexOf(rank);
+};
+
+const isAceOnlySpread = (cards: Card[]): boolean => cards.every((card) => card.rank === 'Ace');
+
+const findFirstSpreadInHand = (
+  hand: Card[],
+  predicate: (cards: Card[]) => boolean
+): Card[] | null => {
+  if (hand.length < 3) {
+    return null;
+  }
+
+  const combination: Card[] = [];
+  const search = (startIndex: number, targetSize: number): Card[] | null => {
+    if (combination.length === targetSize) {
+      if (isValidSpread(combination) && predicate(combination)) {
+        return [...combination];
+      }
+      return null;
+    }
+
+    for (let index = startIndex; index < hand.length; index++) {
+      combination.push(hand[index]);
+      const found = search(index + 1, targetSize);
+      combination.pop();
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  };
+
+  for (let spreadSize = 3; spreadSize <= hand.length; spreadSize++) {
+    const found = search(0, spreadSize);
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+};
+
+export const findFirstMandatorySpread = (hand: Card[]): Card[] | null => {
+  return findFirstSpreadInHand(hand, (cards) => !isAceOnlySpread(cards));
 };
 
 /**
@@ -603,8 +691,7 @@ export const isValidSpread = (cards: Card[]): boolean => {
 export const checkReem = (gameState: IGameState, userId: string): boolean => {
   const player = gameState.players.find(p => p.userId === userId);
   if (!player) return false;
-  // A reem is when a player spreads for the second time AND has no cards left.
-  return player.spreads.length === 2 && player.hand.length === 0;
+  return player.hand.length === 0;
 };
 
 /**
@@ -751,6 +838,9 @@ export const playerHitSpread = async (
   if (hittingPlayerIndex === -1) {
     throw new Error(`Hitting player ${hittingPlayerId} not found.`);
   }
+  if (hittingPlayerId === targetPlayerId) {
+    throw new Error('You can only hit another player\'s spread.');
+  }
   assertActiveTurnAction(gameState, hittingPlayerIndex, hittingPlayerId, 'hit');
   const hittingPlayer = gameState.players[hittingPlayerIndex];
   if (!hittingPlayer.hasDrawnThisTurn) {
@@ -798,31 +888,24 @@ export const playerHitSpread = async (
   const updatedTargetPlayerSpreads = [...targetPlayer.spreads];
   updatedTargetPlayerSpreads[targetSpreadIndex] = updatedTargetSpread;
 
-  const updatedPlayers = [...gameState.players];
-  if (hittingPlayerIndex === targetPlayerIndex) {
-    // When a player hits their own spread, merge both updates into one player record.
-    const newHitLockCounter = targetPlayer.hitLockCounter + (targetPlayer.isHitLocked ? 1 : 2);
-    updatedPlayers[hittingPlayerIndex] = {
-      ...hittingPlayer,
-      hand: updatedHittingHand,
-      spreads: updatedTargetPlayerSpreads,
-      isHitLocked: true,
-      hitLockCounter: newHitLockCounter,
-      hasTakenActionThisTurn: true,
-    };
-  } else {
-    const newHitLockCounter = targetPlayer.hitLockCounter + (targetPlayer.isHitLocked ? 1 : 2);
-    targetPlayer = {
-      ...targetPlayer,
-      spreads: updatedTargetPlayerSpreads,
-      isHitLocked: true,
-      hitLockCounter: newHitLockCounter,
-    };
+  const alreadyHitThisTurn = targetPlayer.lastHitAppliedOnTurn === gameState.turn;
+  const lockIncrease = alreadyHitThisTurn
+    ? 0
+    : (targetPlayer.hitLockCounter > 0 ? 1 : 2);
+  const updatedTargetLockCounter = targetPlayer.hitLockCounter + lockIncrease;
 
-    const updatedHittingPlayer = { ...hittingPlayer, hand: updatedHittingHand, hasTakenActionThisTurn: true };
-    updatedPlayers[hittingPlayerIndex] = updatedHittingPlayer;
-    updatedPlayers[targetPlayerIndex] = targetPlayer;
-  }
+  const updatedPlayers = [...gameState.players];
+  targetPlayer = {
+    ...targetPlayer,
+    spreads: updatedTargetPlayerSpreads,
+    isHitLocked: updatedTargetLockCounter > 0,
+    hitLockCounter: updatedTargetLockCounter,
+    lastHitAppliedOnTurn: gameState.turn,
+  };
+
+  const updatedHittingPlayer = { ...hittingPlayer, hand: updatedHittingHand, hasTakenActionThisTurn: true };
+  updatedPlayers[hittingPlayerIndex] = updatedHittingPlayer;
+  updatedPlayers[targetPlayerIndex] = targetPlayer;
 
   const updatedGameState: IGameState = {
     ...gameState,
@@ -835,7 +918,7 @@ export const playerHitSpread = async (
     const roundEndState: IGameState = {
       ...updatedGameState,
       status: 'round-end',
-      roundEndedBy: 'REGULAR',
+      roundEndedBy: 'REEM',
       roundWinnerId: hittingPlayerId,
       handScores: calculateAllHandScores(updatedPlayers),
     };
@@ -865,23 +948,79 @@ export const playerDrop = async (gameState: IGameState, userId: string): Promise
   if (player.hasDrawnThisTurn || player.hasTakenActionThisTurn) {
     throw new Error(`Player ${userId} cannot drop after taking an action this turn.`);
   }
-  if (player.isHitLocked) {
+  if (player.hitLockCounter > 0 || player.isHitLocked) {
     throw new Error(`Player ${userId} cannot drop while hit-locked.`);
   }
 
-  const { winnerId, lowestScore } = getLowestScoreWinnerId(gameState.players);
+  const handScores = calculateAllHandScores(gameState.players);
+  const dropperScore = handScores[userId];
+  const lowestOpponent = gameState.players
+    .filter((candidate) => candidate.userId !== userId)
+    .sort((a, b) => (handScores[a.userId] ?? Infinity) - (handScores[b.userId] ?? Infinity))[0];
+
+  if (dropperScore === undefined || !lowestOpponent) {
+    throw new Error('Unable to resolve drop outcome.');
+  }
+
+  const lowestOpponentScore = handScores[lowestOpponent.userId] ?? Infinity;
+  const isCaughtDrop = lowestOpponentScore <= dropperScore;
+  const winnerId = isCaughtDrop ? lowestOpponent.userId : userId;
 
   // Acknowledge drop and end the round
   let updatedGameState: IGameState = {
     ...gameState,
     status: 'round-end',
-    lastAction: { type: 'drop', payload: { userId, handValue: calculateHandValue(player.hand), winnerId, lowestScore } as any, timestamp: Date.now() },
-    roundEndedBy: 'REGULAR',
+    lastAction: {
+      type: 'drop',
+      payload: {
+        userId,
+        handValue: dropperScore,
+        winnerId,
+        lowestScore: Math.min(dropperScore, lowestOpponentScore),
+        caught: isCaughtDrop,
+      } as any,
+      timestamp: Date.now(),
+    },
+    roundEndedBy: isCaughtDrop ? 'CAUGHT_DROP' : 'REGULAR',
     roundWinnerId: winnerId,
+    caughtDroppingPlayerId: isCaughtDrop ? userId : undefined,
+    handScores,
+  };
+
+  updatedGameState = finalizeRoundState(updatedGameState);
+  return updatedGameState;
+};
+
+export const playerDeclare41 = async (gameState: IGameState, userId: string): Promise<IGameState> => {
+  gameState = normalizeTurnTrackingState(gameState);
+  const playerIndex = gameState.players.findIndex((player) => player.userId === userId);
+  if (playerIndex === -1) {
+    throw new Error(`Player ${userId} not found.`);
+  }
+
+  assertActiveTurnAction(gameState, playerIndex, userId, 'declare 41');
+  const player = gameState.players[playerIndex];
+
+  if (player.hasDrawnThisTurn || player.hasTakenActionThisTurn || player.hasDiscardedThisTurn) {
+    throw new Error('41 can only be declared at the start of your turn before drawing.');
+  }
+
+  if (player.hasDrawnAnyCard) {
+    throw new Error('41 can only be declared before you draw your first card of the round.');
+  }
+
+  if (player.startingHandValue !== 41 || calculateHandValue(player.hand) !== 41) {
+    throw new Error('Your starting hand is not exactly 41.');
+  }
+
+  const updatedGameState: IGameState = {
+    ...gameState,
+    status: 'round-end',
+    roundEndedBy: 'AUTO_TRIPLE',
+    roundWinnerId: userId,
+    lastAction: { type: 'declare41', payload: { userId } as any, timestamp: Date.now() },
     handScores: calculateAllHandScores(gameState.players),
   };
 
-  // TODO: Implement logic for caught dropping. For now, assume not caught.
-  updatedGameState = finalizeRoundState(updatedGameState);
-  return updatedGameState;
+  return finalizeRoundState(updatedGameState);
 };

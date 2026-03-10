@@ -1,5 +1,5 @@
 import { Server, Socket } from "socket.io";
-import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, nextTurn, IGameState, toEngineRoundResult, DEFAULT_TURN_DURATION_MS } from "../game/gameEngine";
+import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, playerDeclare41, findFirstMandatorySpread, nextTurn, IGameState, toEngineRoundResult, DEFAULT_TURN_DURATION_MS } from "../game/gameEngine";
 import { getAIPlayerAction } from "../game/aiPlayer"; // Import AI logic
 import Table, { TableDocument } from "../models/Table"; // Import TableDocument
 import Contest, { ContestDocument } from "../models/Contest";
@@ -407,29 +407,63 @@ const handleTurnExpiration = async (
       return;
     }
 
-    const restrictedCardId = currentPlayer.restrictedDiscardCard ?? null;
-    const discardableCards = currentPlayer.hand.filter((card) => {
+    let workingState = gameState;
+    let actingPlayer = currentPlayer;
+
+    let mandatorySpread = findFirstMandatorySpread(actingPlayer.hand);
+    while (mandatorySpread) {
+      workingState = await playerSpreadCards(workingState, actingPlayer.userId, mandatorySpread);
+
+      if (workingState.status === "round-end") {
+        io.to(tableId).emit("turnExpired", {
+          type: "auto-spread",
+          userId: currentPlayer.userId,
+          username: currentPlayer.username,
+          turn: expectedTurn,
+          message: `${currentPlayer.username} timed out and auto-played a forced spread.`,
+        });
+        await settleRoundAndBroadcast(io, tableId, workingState);
+        return;
+      }
+
+      await saveGameState(workingState);
+      io.to(tableId).emit("gameStateUpdate", workingState);
+
+      actingPlayer = workingState.players[workingState.currentPlayerIndex];
+      if (!actingPlayer || actingPlayer.userId !== currentPlayer.userId) {
+        break;
+      }
+      mandatorySpread = findFirstMandatorySpread(actingPlayer.hand);
+    }
+
+    if (!actingPlayer || actingPlayer.userId !== currentPlayer.userId) {
+      runTurnLoop(io, tableId, workingState);
+      return;
+    }
+
+    const restrictedCardId = actingPlayer.restrictedDiscardCard ?? null;
+    const discardableCards = actingPlayer.hand.filter((card) => {
       const id = `${card.rank}-${card.suit}`;
       return restrictedCardId === null || id !== restrictedCardId;
     });
-    const randomSource = discardableCards.length > 0 ? discardableCards : currentPlayer.hand;
+    const randomSource = discardableCards.length > 0 ? discardableCards : actingPlayer.hand;
 
     if (randomSource.length === 0) {
       const skippedTurnState = {
-        ...nextTurn(gameState),
+        ...nextTurn(workingState),
         lastAction: {
-          type: "turnExpiredSkipNoCards",
-          payload: { userId: currentPlayer.userId } as any,
+          type: "turnExpiredSkipNoDiscard",
+          payload: { userId: actingPlayer.userId } as any,
           timestamp: Date.now(),
         },
       };
       await saveGameState(skippedTurnState);
       io.to(tableId).emit("turnExpired", {
         type: "skip",
-        userId: currentPlayer.userId,
-        username: currentPlayer.username,
+        userId: actingPlayer.userId,
+        username: actingPlayer.username,
         turn: expectedTurn,
-        message: `${currentPlayer.username} had no card to auto-discard and was skipped.`,
+        message: `${actingPlayer.username} had no legal auto-discard and was skipped.`,
       });
       io.to(tableId).emit("gameStateUpdate", skippedTurnState);
       runTurnLoop(io, tableId, skippedTurnState);
@@ -437,16 +471,16 @@ const handleTurnExpiration = async (
     }
 
     const randomCard = randomSource[Math.floor(Math.random() * randomSource.length)];
-    const discardedState = await playerDiscardCard(gameState, currentPlayer.userId, randomCard);
+    const discardedState = await playerDiscardCard(workingState, actingPlayer.userId, randomCard);
 
     if (discardedState.status === "round-end") {
       io.to(tableId).emit("turnExpired", {
         type: "auto-discard",
-        userId: currentPlayer.userId,
-        username: currentPlayer.username,
+        userId: actingPlayer.userId,
+        username: actingPlayer.username,
         turn: expectedTurn,
         card: randomCard,
-        message: `${currentPlayer.username} timed out. ${randomCard.rank} of ${randomCard.suit} was auto-discarded.`,
+        message: `${actingPlayer.username} timed out. ${randomCard.rank} of ${randomCard.suit} was auto-discarded.`,
       });
       await settleRoundAndBroadcast(io, tableId, discardedState);
       return;
@@ -459,7 +493,7 @@ const handleTurnExpiration = async (
       ...nextTurn(discardedState),
       lastAction: {
         type: "turnExpiredAutoDiscard",
-        payload: { userId: currentPlayer.userId, card: randomCard } as any,
+        payload: { userId: actingPlayer.userId, card: randomCard } as any,
         timestamp: Date.now(),
       },
     };
@@ -467,11 +501,11 @@ const handleTurnExpiration = async (
     await saveGameState(nextState);
     io.to(tableId).emit("turnExpired", {
       type: "auto-discard",
-      userId: currentPlayer.userId,
-      username: currentPlayer.username,
+      userId: actingPlayer.userId,
+      username: actingPlayer.username,
       turn: expectedTurn,
       card: randomCard,
-      message: `${currentPlayer.username} timed out. ${randomCard.rank} of ${randomCard.suit} was auto-discarded.`,
+      message: `${actingPlayer.username} timed out. ${randomCard.rank} of ${randomCard.suit} was auto-discarded.`,
     });
     io.to(tableId).emit("gameStateUpdate", nextState);
     runTurnLoop(io, tableId, nextState);
@@ -673,7 +707,12 @@ const handleAITurn = async (io: Server, tableId: string) => {
 
         let updatedGameState = gameState;
 
-        if (aiAction.type === 'draw') {
+        if (aiAction.type === 'declare41') {
+           updatedGameState = await playerDeclare41(updatedGameState, currentPlayer.userId);
+           await settleRoundAndBroadcast(io, tableId, updatedGameState);
+           return;
+
+        } else if (aiAction.type === 'draw') {
            updatedGameState = await playerDrawCard(updatedGameState, currentPlayer.userId);
            if (updatedGameState.status === 'round-end') {
               await settleRoundAndBroadcast(io, tableId, updatedGameState);
@@ -1238,6 +1277,20 @@ const setupSocketHandlers = (io: Server) => {
           runTurnLoop(io, tableId, updatedGameState);
           // After hitting, the player must discard one card.
           // This logic will be more complex and managed by turn flow.
+        } catch (error: any) {
+          socket.emit("gameError", { message: error.message });
+        }
+      }
+    });
+
+    // Event: Player declares 41
+    socket.on("declare41", async ({ tableId, userId }: { tableId: string; userId: string }) => {
+      console.log(`User ${userId} declared 41 in table ${tableId}`);
+      let gameState = await loadGameState(tableId);
+      if (gameState) {
+        try {
+          const updatedGameState = await playerDeclare41(gameState, userId);
+          await settleRoundAndBroadcast(io, tableId, updatedGameState);
         } catch (error: any) {
           socket.emit("gameError", { message: error.message });
         }

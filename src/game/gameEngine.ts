@@ -101,6 +101,37 @@ export const calculateAllHandScores = (players: Array<{ userId: string; hand: Ca
   return scores;
 };
 
+const CARD_RANK_ORDER: CardRank[] = ['Ace', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'Jack', 'Queen', 'King'];
+const CARD_SUIT_ORDER: CardSuit[] = ['Hearts', 'Diamonds', 'Clubs', 'Spades'];
+
+const getCardNumericalRank = (rank: CardRank): number => CARD_RANK_ORDER.indexOf(rank);
+
+const getCardSuitOrder = (suit: CardSuit): number => CARD_SUIT_ORDER.indexOf(suit);
+
+const sortHandCards = (cards: Card[]): Card[] => {
+  return [...cards].sort((a, b) => {
+    const suitDiff = getCardSuitOrder(a.suit) - getCardSuitOrder(b.suit);
+    if (suitDiff !== 0) return suitDiff;
+    return getCardNumericalRank(a.rank) - getCardNumericalRank(b.rank);
+  });
+};
+
+const sortSpreadCards = (cards: Card[]): Card[] => {
+  if (cards.length <= 1) return [...cards];
+
+  const allSameRank = cards.every((card) => card.rank === cards[0].rank);
+  if (allSameRank) {
+    return [...cards].sort((a, b) => getCardSuitOrder(a.suit) - getCardSuitOrder(b.suit));
+  }
+
+  const allSameSuit = cards.every((card) => card.suit === cards[0].suit);
+  if (allSameSuit) {
+    return [...cards].sort((a, b) => getCardNumericalRank(a.rank) - getCardNumericalRank(b.rank));
+  }
+
+  return sortHandCards(cards);
+};
+
 const getLowestScoreWinnerId = (
   players: Array<{ userId: string; hand: Card[] }>
 ): { winnerId: string; lowestScore: number } => {
@@ -242,6 +273,8 @@ const normalizeTurnTrackingState = (gameState: IGameState): IGameState => {
   const turnExpiresAt = gameState.turnExpiresAt ?? (turnStartTime + turnDurationMs);
   const players = gameState.players.map((player) => ({
     ...player,
+    hand: sortHandCards(player.hand),
+    spreads: player.spreads.map(sortSpreadCards),
     hasDrawnThisTurn: player.hasDrawnThisTurn ?? !!player.hasTakenActionThisTurn,
     hasDiscardedThisTurn: player.hasDiscardedThisTurn ?? false,
     hasDrawnAnyCard: player.hasDrawnAnyCard ?? false,
@@ -290,10 +323,9 @@ export const initializeGame = async (
   const shuffledDeck = shuffleDeck(fullDeck);
   const { remainingDeck: dealtDeck, playerHands } = dealCards(shuffledDeck, players.length, 5);
   const remainingDeck = [...dealtDeck];
-  const openingDiscardCard = remainingDeck.shift();
 
   const initialPlayersState = players.map((player, index) => {
-    const hand = playerHands[index];
+    const hand = sortHandCards(playerHands[index]);
     return {
       userId: player.userId.toString(),
       username: player.username,
@@ -328,7 +360,7 @@ export const initializeGame = async (
     currentDealerIndex: dealerIndex, // Rotates clockwise between rounds
     players: initialPlayersState,
     deck: remainingDeck,
-    discardPile: openingDiscardCard ? [openingDiscardCard] : [],
+    discardPile: [],
     turn: 1,
     currentPlayerIndex: firstTurnPlayerIndex, // Start with player clockwise from dealer
     turnStartTime,
@@ -488,11 +520,12 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
   }
 
   newHand.push(drawnCard);
+  const sortedHand = sortHandCards(newHand);
 
   const updatedPlayers = [...gameState.players];
   updatedPlayers[playerIndex] = {
     ...player,
-    hand: newHand,
+    hand: sortedHand,
     hasTakenActionThisTurn: true,
     hasDrawnThisTurn: true,
     hasDiscardedThisTurn: false,
@@ -574,7 +607,7 @@ export const playerDiscardCard = async (gameState: IGameState, userId: string, c
   const updatedPlayers = [...gameState.players];
   updatedPlayers[playerIndex] = {
     ...player,
-    hand: newHand,
+    hand: sortHandCards(newHand),
     hasTakenActionThisTurn: true,
     hasDiscardedThisTurn: true,
     restrictedDiscardCard: null,
@@ -602,12 +635,6 @@ export const playerDiscardCard = async (gameState: IGameState, userId: string, c
   }
 
   return updatedGameState;
-};
-
-// Helper to get card value for sorting and sequence checking
-const getCardNumericalRank = (rank: CardRank): number => {
-  const ranks = ['Ace', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'Jack', 'Queen', 'King'];
-  return ranks.indexOf(rank);
 };
 
 const isAceOnlySpread = (cards: Card[]): boolean => cards.every((card) => card.rank === 'Ace');
@@ -748,12 +775,13 @@ export const playerSpreadCards = async (gameState: IGameState, userId: string, c
   }
 
   // 4. Add to player's spreads
-  newSpreads.push(cardsToSpread);
+  const sortedSpread = sortSpreadCards(cardsToSpread);
+  newSpreads.push(sortedSpread);
 
   // 5. Update player's spread count for the turn
   const updatedPlayer = {
     ...player,
-    hand: newHand,
+    hand: sortHandCards(newHand),
     spreads: newSpreads,
     hasTakenActionThisTurn: true,
   };
@@ -765,7 +793,7 @@ export const playerSpreadCards = async (gameState: IGameState, userId: string, c
     ...gameState,
     status: 'in-progress',
     players: updatedPlayers,
-    lastAction: { type: 'spread', payload: { userId, cards: cardsToSpread } as any, timestamp: Date.now() },
+    lastAction: { type: 'spread', payload: { userId, cards: sortedSpread } as any, timestamp: Date.now() },
   };
 
   // Check for Reem after spreading
@@ -884,7 +912,7 @@ export const playerHitSpread = async (
   }
 
   // Add card to target spread
-  const updatedTargetSpread = [...targetSpread, playedCard].sort((a, b) => getCardNumericalRank(a.rank) - getCardNumericalRank(b.rank));
+  const updatedTargetSpread = sortSpreadCards([...targetSpread, playedCard]);
   const updatedTargetPlayerSpreads = [...targetPlayer.spreads];
   updatedTargetPlayerSpreads[targetSpreadIndex] = updatedTargetSpread;
 
@@ -903,7 +931,7 @@ export const playerHitSpread = async (
     lastHitAppliedOnTurn: gameState.turn,
   };
 
-  const updatedHittingPlayer = { ...hittingPlayer, hand: updatedHittingHand, hasTakenActionThisTurn: true };
+  const updatedHittingPlayer = { ...hittingPlayer, hand: sortHandCards(updatedHittingHand), hasTakenActionThisTurn: true };
   updatedPlayers[hittingPlayerIndex] = updatedHittingPlayer;
   updatedPlayers[targetPlayerIndex] = targetPlayer;
 

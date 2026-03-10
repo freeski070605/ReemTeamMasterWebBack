@@ -1,5 +1,5 @@
 import { Server, Socket } from "socket.io";
-import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, playerDeclare41, findFirstMandatorySpread, nextTurn, IGameState, toEngineRoundResult, DEFAULT_TURN_DURATION_MS } from "../game/gameEngine";
+import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, playerDeclare41, findFirstMandatorySpread, nextTurn, IGameState, toEngineRoundResult, DEFAULT_TURN_DURATION_MS, calculateHandValue } from "../game/gameEngine";
 import { getAIPlayerAction } from "../game/aiPlayer"; // Import AI logic
 import Table, { TableDocument } from "../models/Table"; // Import TableDocument
 import Contest, { ContestDocument } from "../models/Contest";
@@ -330,9 +330,71 @@ const scheduleTurnExpiryTimer = (io: Server, tableId: string, gameState: IGameSt
   turnExpiryTimers.set(tableId, timer);
 };
 
+const canAutoDeclare41 = (player: IGameState["players"][number] | undefined): boolean => {
+  if (!player) {
+    return false;
+  }
+
+  const hasDrawnThisTurn = player.hasDrawnThisTurn ?? !!player.hasTakenActionThisTurn;
+  const hasDiscardedThisTurn = player.hasDiscardedThisTurn ?? false;
+
+  return (
+    !hasDrawnThisTurn &&
+    !hasDiscardedThisTurn &&
+    !player.hasDrawnAnyCard &&
+    player.startingHandValue === 41 &&
+    calculateHandValue(player.hand) === 41
+  );
+};
+
 const runTurnLoop = (io: Server, tableId: string, gameState: IGameState) => {
   if (gameState.status !== "in-progress") {
     clearTurnExpiryTimer(tableId);
+    return;
+  }
+
+  const expectedTurn = gameState.turn;
+  const expectedPlayer = gameState.players[gameState.currentPlayerIndex];
+  if (canAutoDeclare41(expectedPlayer)) {
+    clearTurnExpiryTimer(tableId);
+    void (async () => {
+      const autoDeclareLockKey = `lock:auto-declare41:${tableId}:${expectedTurn}:${expectedPlayer?.userId ?? "unknown"}`;
+      const lockAcquired = await redisClient.set(autoDeclareLockKey, "locked", {
+        NX: true,
+        EX: 5,
+      });
+
+      if (!lockAcquired) {
+        return;
+      }
+
+      try {
+        const latestState = await loadGameState(tableId);
+        if (!latestState || latestState.status !== "in-progress") {
+          return;
+        }
+
+        const latestPlayer = latestState.players[latestState.currentPlayerIndex];
+        if (!latestPlayer) {
+          return;
+        }
+
+        if (latestState.turn !== expectedTurn || latestPlayer.userId !== expectedPlayer?.userId) {
+          return;
+        }
+
+        if (!canAutoDeclare41(latestPlayer)) {
+          return;
+        }
+
+        const resolvedState = await playerDeclare41(latestState, latestPlayer.userId);
+        await settleRoundAndBroadcast(io, tableId, resolvedState);
+      } catch (error) {
+        console.error("Error while auto-resolving 41:", error);
+      } finally {
+        await redisClient.del(autoDeclareLockKey);
+      }
+    })();
     return;
   }
 

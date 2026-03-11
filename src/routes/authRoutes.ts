@@ -174,18 +174,23 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
       await user.save();
 
       const resetLink = `${getFrontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
-      const emailResult = await sendPasswordResetEmail(normalizedEmail, resetLink);
-
-      if (!emailResult.sent) {
-        console.warn(
-          `[auth] Password reset email not sent for ${normalizedEmail} (${emailResult.reason ?? 'unknown reason'}).`
-        );
-      }
 
       if (process.env.NODE_ENV !== 'production') {
         console.log(`[auth] Password reset link for ${normalizedEmail}: ${resetLink}`);
         devResetLink = resetLink;
       }
+
+      void sendPasswordResetEmail(normalizedEmail, resetLink)
+        .then((emailResult) => {
+          if (!emailResult.sent) {
+            console.warn(
+              `[auth] Password reset email not sent for ${normalizedEmail} (${emailResult.reason ?? 'unknown reason'}).`
+            );
+          }
+        })
+        .catch((error) => {
+          console.error(`[auth] Password reset email failed for ${normalizedEmail}`, error);
+        });
     }
 
     return res.status(200).json({

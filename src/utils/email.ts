@@ -54,12 +54,18 @@ const createTransporter = () => {
 
   const user = normalizeString(process.env.SMTP_USER);
   const pass = normalizeString(process.env.SMTP_PASS);
+  const connectionTimeoutMs = Number(process.env.SMTP_CONNECTION_TIMEOUT_MS) || 10000;
+  const greetingTimeoutMs = Number(process.env.SMTP_GREETING_TIMEOUT_MS) || 10000;
+  const socketTimeoutMs = Number(process.env.SMTP_SOCKET_TIMEOUT_MS) || 20000;
 
   return nodemailer.createTransport({
     host,
     port,
     secure,
     auth: user && pass ? { user, pass } : undefined,
+    connectionTimeout: connectionTimeoutMs,
+    greetingTimeout: greetingTimeoutMs,
+    socketTimeout: socketTimeoutMs,
   });
 };
 

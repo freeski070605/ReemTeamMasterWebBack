@@ -1,3 +1,4 @@
+import axios from 'axios';
 import nodemailer from 'nodemailer';
 
 type SendEmailResult = {
@@ -20,7 +21,7 @@ const parseBoolean = (value: string) => {
   return undefined;
 };
 
-const resolveFromAddress = (smtpUser?: string) => {
+const resolveFromAddress = (smtpUser?: string, mailgunDomain?: string) => {
   const explicitFrom = normalizeString(process.env.EMAIL_FROM);
   if (explicitFrom) {
     return explicitFrom;
@@ -30,6 +31,12 @@ const resolveFromAddress = (smtpUser?: string) => {
   if (explicitAddress) {
     const fromName = normalizeString(process.env.EMAIL_FROM_NAME);
     return fromName ? `${fromName} <${explicitAddress}>` : explicitAddress;
+  }
+
+  if (mailgunDomain) {
+    const fromName = normalizeString(process.env.EMAIL_FROM_NAME);
+    const address = `postmaster@${mailgunDomain}`;
+    return fromName ? `${fromName} <${address}>` : address;
   }
 
   if (smtpUser && smtpUser.includes('@')) {
@@ -99,10 +106,55 @@ const buildPasswordResetEmail = (resetLink: string) => {
   return { subject, text, html };
 };
 
+const sendWithMailgun = async (
+  toEmail: string,
+  resetLink: string
+): Promise<SendEmailResult> => {
+  const apiKey = normalizeString(process.env.MAILGUN_API_KEY);
+  const domain = normalizeString(process.env.MAILGUN_DOMAIN);
+  if (!apiKey || !domain) {
+    return { sent: false, reason: 'mailgun_not_configured' };
+  }
+
+  const baseUrl = normalizeString(process.env.MAILGUN_BASE_URL) || 'https://api.mailgun.net';
+  const from = resolveFromAddress(undefined, domain);
+  if (!from) {
+    return { sent: false, reason: 'from_address_missing' };
+  }
+
+  const { subject, text, html } = buildPasswordResetEmail(resetLink);
+  const form = new URLSearchParams();
+  form.set('from', from);
+  form.set('to', toEmail);
+  form.set('subject', subject);
+  form.set('text', text);
+  form.set('html', html);
+
+  const timeoutMs = Number(process.env.MAILGUN_TIMEOUT_MS) || 10000;
+
+  try {
+    await axios.post(`${baseUrl}/v3/${domain}/messages`, form, {
+      auth: { username: 'api', password: apiKey },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: timeoutMs,
+    });
+    return { sent: true };
+  } catch (error) {
+    console.error('[email] Mailgun send failed', error);
+    return { sent: false, reason: 'send_failed' };
+  }
+};
+
 export const sendPasswordResetEmail = async (
   toEmail: string,
   resetLink: string
 ): Promise<SendEmailResult> => {
+  const hasMailgun = !!normalizeString(process.env.MAILGUN_API_KEY)
+    && !!normalizeString(process.env.MAILGUN_DOMAIN);
+  if (hasMailgun) {
+    return sendWithMailgun(toEmail, resetLink);
+  }
+
   const transporter = createTransporter();
   if (!transporter) {
     return { sent: false, reason: 'smtp_not_configured' };

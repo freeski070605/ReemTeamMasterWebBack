@@ -28,6 +28,16 @@ const tableSchema = new Schema({
     required: true,
     default: DEFAULT_GAME_MODE,
   },
+  isPrivate: {
+    type: Boolean,
+    required: true,
+    default: false,
+    index: true,
+  },
+  createdBy: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  },
   minPlayers: {
     type: Number,
     required: true,
@@ -70,6 +80,8 @@ export interface ITable {
   name: string;
   stake: number;
   mode: GameMode;
+  isPrivate: boolean;
+  createdBy?: Types.ObjectId;
   minPlayers: number;
   maxPlayers: number;
   currentPlayerCount: number;

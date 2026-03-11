@@ -106,6 +106,39 @@ const buildPasswordResetEmail = (resetLink: string) => {
   return { subject, text, html };
 };
 
+const buildInviteEmail = (inviteLink: string, inviterName?: string) => {
+  const appName = normalizeString(process.env.APP_NAME) || 'ReemTeam';
+  const subject =
+    normalizeString(process.env.INVITE_EMAIL_SUBJECT) || `${appName} invite`;
+
+  const inviterLabel = inviterName ? `${inviterName} invited you to a table` : `You have a ${appName} invite`;
+
+  const text = [
+    inviterLabel,
+    '',
+    'Use the link below to join:',
+    inviteLink,
+    '',
+    'If you did not expect this, you can ignore this email.',
+  ].join('\n');
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <p>${inviterLabel}</p>
+      <p>
+        <a href="${inviteLink}" style="color: #0f766e; font-weight: 600;">
+          Join the table
+        </a>
+      </p>
+      <p>If the button above does not work, copy and paste this link into your browser:</p>
+      <p style="word-break: break-all;">${inviteLink}</p>
+      <p>If you did not expect this, you can ignore this email.</p>
+    </div>
+  `;
+
+  return { subject, text, html };
+};
+
 const sendWithMailgun = async (
   toEmail: string,
   resetLink: string
@@ -179,6 +212,65 @@ export const sendPasswordResetEmail = async (
     return { sent: true };
   } catch (error) {
     console.error('[email] Failed to send password reset email', error);
+    return { sent: false, reason: 'send_failed' };
+  }
+};
+
+export const sendInviteEmail = async (
+  toEmail: string,
+  inviteLink: string,
+  inviterName?: string
+): Promise<SendEmailResult> => {
+  const hasMailgun = !!normalizeString(process.env.MAILGUN_API_KEY)
+    && !!normalizeString(process.env.MAILGUN_DOMAIN);
+  const from = resolveFromAddress(normalizeString(process.env.SMTP_USER), normalizeString(process.env.MAILGUN_DOMAIN));
+  if (!from) {
+    return { sent: false, reason: 'from_address_missing' };
+  }
+
+  const { subject, text, html } = buildInviteEmail(inviteLink, inviterName);
+
+  if (hasMailgun) {
+    const apiKey = normalizeString(process.env.MAILGUN_API_KEY);
+    const domain = normalizeString(process.env.MAILGUN_DOMAIN);
+    const baseUrl = normalizeString(process.env.MAILGUN_BASE_URL) || 'https://api.mailgun.net';
+    const form = new URLSearchParams();
+    form.set('from', from);
+    form.set('to', toEmail);
+    form.set('subject', subject);
+    form.set('text', text);
+    form.set('html', html);
+
+    const timeoutMs = Number(process.env.MAILGUN_TIMEOUT_MS) || 10000;
+    try {
+      await axios.post(`${baseUrl}/v3/${domain}/messages`, form, {
+        auth: { username: 'api', password: apiKey },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: timeoutMs,
+      });
+      return { sent: true };
+    } catch (error) {
+      console.error('[email] Mailgun invite send failed', error);
+      return { sent: false, reason: 'send_failed' };
+    }
+  }
+
+  const transporter = createTransporter();
+  if (!transporter) {
+    return { sent: false, reason: 'smtp_not_configured' };
+  }
+
+  try {
+    await transporter.sendMail({
+      from,
+      to: toEmail,
+      subject,
+      text,
+      html,
+    });
+    return { sent: true };
+  } catch (error) {
+    console.error('[email] Failed to send invite email', error);
     return { sent: false, reason: 'send_failed' };
   }
 };

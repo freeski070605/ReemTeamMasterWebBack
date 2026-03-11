@@ -3,6 +3,7 @@ import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import User from '../models/User';
+import RecentPlayer from '../models/RecentPlayer';
 import authMiddleware from '../middleware/auth';
 
 const router = Router();
@@ -100,5 +101,27 @@ router.post('/avatar/upload', authMiddleware, upload.single('avatar'), uploadAva
 router.post('/avatar', authMiddleware, upload.single('avatar'), uploadAvatarHandler);
 router.post('/avatar/select-default', authMiddleware, selectDefaultAvatarHandler);
 router.post('/avatar/default', authMiddleware, selectDefaultAvatarHandler);
+
+router.get('/recent-players', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 20) : 10;
+
+    const recent = await RecentPlayer.find({ userId })
+      .sort({ lastPlayedAt: -1 })
+      .limit(limit)
+      .lean();
+
+    return res.status(200).json(recent);
+  } catch (error) {
+    console.error('Failed to fetch recent players', error);
+    return res.status(500).json({ message: 'Failed to fetch recent players.' });
+  }
+});
 
 export default router;

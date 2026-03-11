@@ -12,6 +12,9 @@ import { GameMode } from "../domain/gameMode";
 import { ModeController } from "../services/modeController";
 import { ContestService } from "../services/contestService";
 import { ensureWalletForUser } from "../services/walletProvisioningService";
+import Invite from "../models/Invite";
+import { PresenceService } from "../services/presenceService";
+import { RecentPlayerService } from "../services/recentPlayerService";
 
 // Define a type for our socket with custom properties
 interface CustomSocket extends Socket {
@@ -25,6 +28,52 @@ const TURN_DURATION_MS = DEFAULT_TURN_DURATION_MS;
 const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
 const turnExpiryTimers = new Map<string, NodeJS.Timeout>();
 const roundCurrency = (value: number): number => Math.round(value * 100) / 100;
+const LOBBY_ROOM = "lobby";
+let lastPresenceBroadcastAt = 0;
+let lastLobbyOnlineCount: number | null = null;
+let lastLobbyConnectionCount: number | null = null;
+
+const getLobbyConnectionCount = (io: Server) => {
+  return io.sockets.adapter.rooms.get(LOBBY_ROOM)?.size ?? 0;
+};
+
+const emitLobbyPresence = async (io: Server, force = false) => {
+  const now = Date.now();
+  if (!force && now - lastPresenceBroadcastAt < 4000) {
+    return;
+  }
+
+  const onlinePlayers = await PresenceService.getOnlineCount();
+  const lobbyConnections = getLobbyConnectionCount(io);
+
+  if (
+    !force &&
+    lastLobbyOnlineCount === onlinePlayers &&
+    lastLobbyConnectionCount === lobbyConnections
+  ) {
+    return;
+  }
+
+  lastPresenceBroadcastAt = now;
+  lastLobbyOnlineCount = onlinePlayers;
+  lastLobbyConnectionCount = lobbyConnections;
+
+  io.to(LOBBY_ROOM).emit("lobbyPresence", {
+    onlinePlayers,
+    lobbyConnections,
+    timestamp: now,
+  });
+};
+
+const emitLobbyEvent = (
+  io: Server,
+  payload: { type: string; message: string; tableId?: string; username?: string }
+) => {
+  io.to(LOBBY_ROOM).emit("lobbyEvent", {
+    ...payload,
+    timestamp: Date.now(),
+  });
+};
 
 const clearTurnExpiryTimer = (tableId: string) => {
   const timer = turnExpiryTimers.get(tableId);
@@ -186,6 +235,11 @@ const settleRoundAndBroadcast = async (
   }
 
   await emitWalletBalanceUpdates(io, tableId, settledState);
+  try {
+    await RecentPlayerService.recordRecentPlayers(settledState.players);
+  } catch (error) {
+    console.error("Failed to record recent players:", error);
+  }
   if (isContinuousMode(settledState.mode)) {
     await beginRoundReadyPhase(io, tableId, settledState);
     return settledState;
@@ -932,6 +986,13 @@ const handlePlayerLeave = async (io: Server, tableId: string, userId: string, us
     }
 
     io.to(tableId).emit("playerLeft", { userId });
+    emitLobbyEvent(io, {
+      type: "player_left",
+      message: `${username} left ${table.name}.`,
+      tableId,
+      username,
+    });
+    void emitLobbyPresence(io);
   } finally {
     await redisClient.del(lockKey);
   }
@@ -943,6 +1004,31 @@ const setupSocketHandlers = (io: Server) => {
   io.on("connection", (socket: CustomSocket) => {
     console.log(`User connected: ${socket.id}`);
 
+    socket.on("joinLobby", async ({ userId, username }: { userId?: string; username?: string }) => {
+      socket.join(LOBBY_ROOM);
+      if (userId) {
+        await PresenceService.markOnline(userId);
+      }
+      emitLobbyEvent(io, {
+        type: "lobby_join",
+        message: username ? `${username} entered the lobby.` : "Player entered the lobby.",
+        username,
+      });
+      void emitLobbyPresence(io, true);
+    });
+
+    socket.on("leaveLobby", () => {
+      socket.leave(LOBBY_ROOM);
+      void emitLobbyPresence(io, true);
+    });
+
+    socket.on("presenceHeartbeat", async ({ userId }: { userId?: string }) => {
+      if (userId) {
+        await PresenceService.markOnline(userId);
+      }
+      void emitLobbyPresence(io);
+    });
+
     // Event: Player joins a table
     socket.on("joinTable", async ({
       tableId,
@@ -950,12 +1036,14 @@ const setupSocketHandlers = (io: Server) => {
       username,
       avatarUrl,
       contestId,
+      inviteCode,
     }: {
       tableId: string;
       userId: string;
       username: string;
       avatarUrl?: string;
       contestId?: string;
+      inviteCode?: string;
     }) => {
       console.log(`User ${username} (${userId}) attempting to join table ${tableId}`);
       let table = await Table.findById(tableId);
@@ -971,12 +1059,39 @@ const setupSocketHandlers = (io: Server) => {
 
       // Check if player is already in the table
       const existingPlayer = table.players.find(p => p.userId.toString() === userId);
+
+      if (table.isPrivate && !existingPlayer) {
+        const isOwner = table.createdBy?.toString() === userId;
+        if (!isOwner) {
+          const normalizedCode = typeof inviteCode === "string" ? inviteCode.trim() : "";
+          if (!normalizedCode) {
+            return socket.emit("gameError", { message: "Invite code required to join this private table." });
+          }
+          const invite = await Invite.findOne({ code: normalizedCode, tableId: table._id });
+          const expired = invite?.expiresAt && invite.expiresAt.getTime() <= Date.now();
+          const maxed = invite && invite.maxUses > 0 && invite.uses >= invite.maxUses;
+          if (!invite || expired || maxed) {
+            return socket.emit("gameError", { message: "Invite code is invalid or expired." });
+          }
+          await Invite.updateOne(
+            { _id: invite._id },
+            {
+              $set: { lastUsedAt: new Date() },
+              $inc: { uses: 1 },
+              $addToSet: { usedBy: new mongoose.Types.ObjectId(userId) },
+            }
+          );
+        }
+      }
+
       if (existingPlayer) {
         console.log(`User ${username} (${userId}) is already in table ${tableId}. Rejoining.`);
         socket.join(tableId);
         socket.tableId = tableId;
         socket.userId = userId;
         socket.username = username;
+        await PresenceService.markOnline(userId);
+        void emitLobbyPresence(io);
 
         const gameState = await loadGameState(tableId);
         if (gameState) {
@@ -1047,6 +1162,15 @@ const setupSocketHandlers = (io: Server) => {
       socket.tableId = tableId;
       socket.userId = userId;
       socket.username = username;
+
+      await PresenceService.markOnline(userId);
+      emitLobbyEvent(io, {
+        type: "table_join",
+        message: `${username} joined ${table.name}.`,
+        tableId,
+        username,
+      });
+      void emitLobbyPresence(io);
       
       // Check if we need to add an AI to start the game immediately (1 User vs 1 AI)
       if (table.currentPlayerCount === 1 && isCribTableMode(tableMode)) {
@@ -1403,6 +1527,7 @@ const setupSocketHandlers = (io: Server) => {
       if (socket.tableId && socket.userId && socket.username) {
         await handlePlayerLeave(io, socket.tableId, socket.userId, socket.username);
       }
+      void emitLobbyPresence(io, true);
     });
   });
 };

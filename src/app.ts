@@ -11,6 +11,9 @@ import rtcRoutes from './routes/rtcRoutes';
 import contestRoutes from './routes/contestRoutes';
 import ticketRoutes from './routes/ticketRoutes';
 import adminRoutes from './routes/adminRoutes';
+import analyticsRoutes from './routes/analyticsRoutes';
+import inviteRoutes from './routes/inviteRoutes';
+import lobbyRoutes from './routes/lobbyRoutes';
 import authMiddleware from './middleware/auth'; // Import auth middleware
 import { corsOptions } from './config/cors';
 
@@ -44,6 +47,9 @@ app.use('/api/rtc', rtcRoutes);
 app.use('/api/contests', contestRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/invites', inviteRoutes);
+app.use('/api/lobby', lobbyRoutes);
 
 // Protected route example
 app.get('/api/protected', authMiddleware, (req, res) => {

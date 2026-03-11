@@ -22,6 +22,8 @@ export interface IEngineRoundResult {
     rank: number;
     winType: PlacementWinType;
   }>;
+  dropperId?: string; // The user ID of the player who dropped, if applicable
+  playerCount: number; // The total number of players in the round
 }
 
 // Represents the live state of a game table in Redis
@@ -64,6 +66,7 @@ export interface IGameState {
   roundEndedBy: RoundEndType | null; // How the round ended
   roundWinnerId?: string;
   roundLoserId?: string;
+  dropperId?: string;
   caughtDroppingPlayerId?: string; // If a player was caught dropping
   handScores?: { [userId: string]: number }; // Stores final hand scores for all players at round end
   placements?: IPlacement[];
@@ -264,6 +267,8 @@ export const toEngineRoundResult = (gameState: IGameState): IEngineRoundResult |
       rank: placement.rank,
       winType: placement.winType,
     })),
+    dropperId: finalized.dropperId,
+    playerCount: finalized.players.length,
   };
 };
 
@@ -1011,6 +1016,7 @@ export const playerDrop = async (gameState: IGameState, userId: string): Promise
     },
     roundEndedBy: isCaughtDrop ? 'CAUGHT_DROP' : 'REGULAR',
     roundWinnerId: winnerId,
+    dropperId: userId,
     caughtDroppingPlayerId: isCaughtDrop ? userId : undefined,
     handScores,
   };

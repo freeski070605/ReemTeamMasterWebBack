@@ -4,6 +4,15 @@ export const RTC_DAILY_MINIMUM = 1000;
 export const RTC_REFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const RTC_STAKE_MULTIPLIER = 1000;
 
+// Payout multipliers for a successful drop
+export const PAYOUT_SUCCESSFUL_DROP = {
+    '4_PLAYERS': 3, // 3 * stake
+    '3_PLAYERS': 2, // 2 * stake
+};
+
+// Payout multiplier for "41 and 11 and Under"
+export const PAYOUT_AUTO_WIN_MULTIPLIER = 9; // 9 * stake for 4 players
+
 export interface RtcPurchaseBundle {
   id: string;
   usdPrice: number;

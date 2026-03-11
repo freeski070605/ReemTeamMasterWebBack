@@ -1,10 +1,13 @@
 import {
+  PAYOUT_AUTO_WIN_MULTIPLIER,
+  PAYOUT_SUCCESSFUL_DROP,
   RTC_DAILY_MINIMUM,
   RTC_PURCHASE_BUNDLES,
   RTC_REFILL_INTERVAL_MS,
   RtcPurchaseBundle,
 } from '../config/economy';
 import { GameMode } from '../domain/gameMode';
+import { IEngineRoundResult } from '../game/gameEngine';
 import { WalletDocument } from '../models/Wallet';
 import { logLedgerEntry } from './ledgerService';
 import { ensureWalletForUser } from './walletProvisioningService';
@@ -42,6 +45,42 @@ const assertRtcMode = (mode: GameMode) => {
 };
 
 export class RtcEconomyService {
+  static async calculateAndDistributePayouts(result: IEngineRoundResult, stake: number) {
+    const winner = result.placements.find(p => p.rank === 1);
+    if (!winner) return;
+
+    let payoutAmount = 0;
+
+    switch (winner.winType) {
+        case 'REGULAR': // Successful Drop
+            if (result.playerCount === 4) {
+                payoutAmount = stake * PAYOUT_SUCCESSFUL_DROP['4_PLAYERS'];
+            } else if (result.playerCount === 3) {
+                payoutAmount = stake * PAYOUT_SUCCESSFUL_DROP['3_PLAYERS'];
+            }
+            // Handle other player counts if necessary
+            break;
+
+        case 'CAUGHT_DROP':
+            const dropperId = result.dropperId;
+            const otherPlayers = result.placements.filter(p => p.userId !== winner.userId && p.userId !== dropperId);
+            const dropperStake = stake * 2;
+            const otherPlayersStake = otherPlayers.length * stake;
+            payoutAmount = dropperStake + otherPlayersStake;
+            break;
+
+        case 'AUTO_TRIPLE': // 41 and 11 and Under
+              if (result.playerCount === 4) {
+                payoutAmount = stake * PAYOUT_AUTO_WIN_MULTIPLIER;
+            }
+            break;
+    }
+
+    if (payoutAmount > 0) {
+        await this.rtcPrizeCredit(winner.userId, payoutAmount, result.mode, { referenceType: 'match', referenceId: result.sessionId });
+    }
+  }
+
   static async rtcPurchase(userId: string, bundleId: string, reference: RtcReference = {}) {
     const bundle = getRtcBundle(bundleId);
     const wallet = await getWalletByUserId(userId);

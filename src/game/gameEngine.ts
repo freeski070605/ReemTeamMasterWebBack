@@ -80,7 +80,7 @@ export interface IGameState {
 
 /**
  * Calculates the total value of a player's hand.
- * Ace = 1, 2-10 = face value, J/Q/K = 10.
+ * Ace = 1, 2-7 = face value, J/Q/K = 10.
  * @param hand The player's hand.
  * @returns The total hand value.
  */
@@ -101,7 +101,7 @@ export const calculateAllHandScores = (players: Array<{ userId: string; hand: Ca
   return scores;
 };
 
-const CARD_RANK_ORDER: CardRank[] = ['Ace', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'Jack', 'Queen', 'King'];
+const CARD_RANK_ORDER: CardRank[] = ['Ace', '2', '3', '4', '5', '6', '7', 'Jack', 'Queen', 'King'];
 const CARD_SUIT_ORDER: CardSuit[] = ['Hearts', 'Diamonds', 'Clubs', 'Spades'];
 
 const getCardNumericalRank = (rank: CardRank): number => CARD_RANK_ORDER.indexOf(rank);

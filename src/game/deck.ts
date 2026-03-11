@@ -1,5 +1,5 @@
 export type CardSuit = 'Hearts' | 'Diamonds' | 'Clubs' | 'Spades';
-export type CardRank = 'Ace' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | 'Jack' | 'Queen' | 'King';
+export type CardRank = 'Ace' | '2' | '3' | '4' | '5' | '6' | '7' | 'Jack' | 'Queen' | 'King';
 
 export interface Card {
   suit: CardSuit;
@@ -16,16 +16,13 @@ const RANKS_AND_VALUES: { rank: CardRank; value: number }[] = [
   { rank: '5', value: 5 },
   { rank: '6', value: 6 },
   { rank: '7', value: 7 },
-  { rank: '8', value: 8 },
-  { rank: '9', value: 9 },
-  { rank: '10', value: 10 },
   { rank: 'Jack', value: 10 },
   { rank: 'Queen', value: 10 },
   { rank: 'King', value: 10 },
 ];
 
 /**
- * Creates a standard 52-card deck (no jokers).
+ * Creates a 40-card deck (no 8/9/10, no jokers).
  * @returns An array of Card objects.
  */
 export const createDeck = (): Card[] => {

@@ -14,6 +14,10 @@ const resolveFrontendBaseUrl = () =>
 
 const buildInviteUrl = (code: string) => `${resolveFrontendBaseUrl()}/invite/${code}`;
 
+const getParam = (value: string | string[]): string => {
+  return Array.isArray(value) ? value[0] : value;
+};
+
 const generateInviteCode = async (): Promise<string> => {
   for (let i = 0; i < 5; i += 1) {
     const code = randomBytes(4).toString('hex');
@@ -91,7 +95,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 
 router.get('/:code', async (req: Request, res: Response) => {
   try {
-    const code = req.params.code.trim();
+    const code = getParam(req.params.code).trim();
     const invite = await Invite.findOne({ code });
     if (!invite || !isInviteUsable(invite)) {
       return res.status(404).json({ message: 'Invite not found or expired.' });
@@ -113,7 +117,7 @@ router.get('/:code', async (req: Request, res: Response) => {
 
 router.post('/:code/accept', async (req: Request, res: Response) => {
   try {
-    const code = req.params.code.trim();
+    const code = getParam(req.params.code).trim();
     const invite = await Invite.findOne({ code });
     if (!invite || !isInviteUsable(invite)) {
       return res.status(404).json({ message: 'Invite not found or expired.' });

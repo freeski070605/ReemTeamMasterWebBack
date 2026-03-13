@@ -9,10 +9,32 @@ import { sendInviteEmail } from '../utils/email';
 
 const router = Router();
 
-const resolveFrontendBaseUrl = () =>
-  (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+const resolveFrontendBaseUrl = (req?: Request) => {
+  const explicit = (process.env.FRONTEND_URL || '').trim();
+  if (explicit) {
+    return explicit.replace(/\/+$/, '');
+  }
 
-const buildInviteUrl = (code: string) => `${resolveFrontendBaseUrl()}/invite/${code}`;
+  const originHeader = typeof req?.headers.origin === 'string' ? req.headers.origin : '';
+  if (originHeader) {
+    return originHeader.replace(/\/+$/, '');
+  }
+
+  const refererHeader = typeof req?.headers.referer === 'string' ? req.headers.referer : '';
+  if (refererHeader) {
+    try {
+      const url = new URL(refererHeader);
+      return `${url.protocol}//${url.host}`;
+    } catch {
+      // fall through
+    }
+  }
+
+  return 'http://localhost:3000';
+};
+
+const buildInviteUrl = (code: string, req?: Request) =>
+  `${resolveFrontendBaseUrl(req)}/invite/${code}`;
 
 const getParam = (value: string | string[]): string => {
   return Array.isArray(value) ? value[0] : value;
@@ -76,7 +98,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       expiresAt,
     });
 
-    const inviteUrl = buildInviteUrl(code);
+    const inviteUrl = buildInviteUrl(code, req);
     const sendTo = typeof email === 'string' ? email.trim() : '';
     if (sendTo) {
       void sendInviteEmail(sendTo, inviteUrl, (req.user as any)?.username);

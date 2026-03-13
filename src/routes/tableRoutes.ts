@@ -4,6 +4,30 @@ import Table from '../models/Table';
 import Invite from '../models/Invite';
 import authMiddleware from '../middleware/auth';
 
+const resolveFrontendBaseUrl = (req: express.Request) => {
+  const explicit = (process.env.FRONTEND_URL || '').trim();
+  if (explicit) {
+    return explicit.replace(/\/+$/, '');
+  }
+
+  const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+  if (originHeader) {
+    return originHeader.replace(/\/+$/, '');
+  }
+
+  const refererHeader = typeof req.headers.referer === 'string' ? req.headers.referer : '';
+  if (refererHeader) {
+    try {
+      const url = new URL(refererHeader);
+      return `${url.protocol}//${url.host}`;
+    } catch {
+      // fall through
+    }
+  }
+
+  return 'http://localhost:3000';
+};
+
 const router = express.Router();
 
 // GET /api/tables
@@ -89,8 +113,7 @@ router.post('/private', authMiddleware, async (req, res) => {
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     });
 
-    const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
-    const inviteUrl = `${frontendBase}/invite/${invite.code}`;
+    const inviteUrl = `${resolveFrontendBaseUrl(req)}/invite/${invite.code}`;
 
     return res.status(201).json({ table, inviteCode: invite.code, inviteUrl });
   } catch (error) {

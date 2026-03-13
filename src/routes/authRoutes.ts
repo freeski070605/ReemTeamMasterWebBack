@@ -8,6 +8,7 @@ import { ITokenPayload } from '../utils/jwt'; // Import ITokenPayload
 import { ensureWalletForUser } from '../services/walletProvisioningService';
 import { resolveUserRole, roleAtLeast } from '../constants/roles';
 import { sendPasswordResetEmail } from '../utils/email';
+import { buildVipPayload } from '../utils/vip';
 
 dotenv.config();
 
@@ -85,6 +86,7 @@ router.post('/register', async (req: Request, res: Response) => {
       isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
     };
     const token = generateToken(tokenPayload);
+    const vipPayload = buildVipPayload(user);
 
     res.status(201).json({
       message: 'User registered successfully',
@@ -95,6 +97,9 @@ router.post('/register', async (req: Request, res: Response) => {
       avatarUrl: user.avatarUrl,
       role: resolveUserRole(user.role, !!user.isAdmin),
       isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
+      vipStatus: vipPayload.vipStatus,
+      vipExpiresAt: vipPayload.vipExpiresAt,
+      isVip: vipPayload.isVip,
     });
   } catch (error) {
     console.error(error);
@@ -139,6 +144,7 @@ router.post('/login', async (req: Request, res: Response) => {
       isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
     };
     const token = generateToken(tokenPayload);
+    const vipPayload = buildVipPayload(user);
 
     res.json({
       message: 'Logged in successfully',
@@ -149,6 +155,9 @@ router.post('/login', async (req: Request, res: Response) => {
       avatarUrl: user.avatarUrl,
       role: resolveUserRole(user.role, !!user.isAdmin),
       isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
+      vipStatus: vipPayload.vipStatus,
+      vipExpiresAt: vipPayload.vipExpiresAt,
+      isVip: vipPayload.isVip,
     });
   } catch (error) {
     console.error(error);

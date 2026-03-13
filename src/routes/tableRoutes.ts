@@ -3,6 +3,9 @@ import { randomBytes } from 'crypto';
 import Table from '../models/Table';
 import Invite from '../models/Invite';
 import authMiddleware from '../middleware/auth';
+import User from '../models/User';
+import { resolveUserRole, roleAtLeast } from '../constants/roles';
+import { isVipActive } from '../utils/vip';
 
 const resolveFrontendBaseUrl = (req: express.Request) => {
   const explicit = (process.env.FRONTEND_URL || '').trim();
@@ -78,6 +81,23 @@ router.post('/quick-seat', async (req, res) => {
 // POST /api/tables/private
 router.post('/private', authMiddleware, async (req, res) => {
   try {
+    const userId = (req.user as any)?.id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
+    }
+
+    const user = await User.findById(userId).select('vipStatus vipExpiresAt role isAdmin');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    const resolvedRole = resolveUserRole(user.role, !!user.isAdmin);
+    const hasAdminBypass = roleAtLeast(resolvedRole, 'admin');
+    const isVip = isVipActive(user.vipStatus, user.vipExpiresAt);
+    if (!isVip && !hasAdminBypass) {
+      return res.status(403).json({ message: 'VIP subscription required to create private tables.' });
+    }
+
     const stake = Number(req.body?.stake);
     const maxPlayers = Number(req.body?.maxPlayers);
 

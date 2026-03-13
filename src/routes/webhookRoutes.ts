@@ -8,6 +8,8 @@ import { ApiError, squareClient } from '../utils/squareApi';
 import LedgerEntry from '../models/LedgerEntry';
 import { RTC_PURCHASE_BUNDLES } from '../config/economy';
 import { RtcEconomyService } from '../services/rtcEconomyService';
+import User from '../models/User';
+import { normalizeVipStatus, resolveVipExpiry } from '../utils/vip';
 
 dotenv.config();
 
@@ -49,6 +51,7 @@ const EMPTY_ORDER_CONTEXT: SquareOrderContext = {
 };
 
 const PAYMENT_COMPLETION_EVENTS = new Set(['payment.updated', 'payment.created']);
+const VIP_PLAN_VARIATION_ID = (process.env.SQUARE_VIP_PLAN_ID || '').trim();
 
 const readMetadataString = (value: unknown): string | null => {
   if (typeof value !== 'string') {
@@ -151,6 +154,26 @@ const toUpperCaseOrNull = (value: string | null): string | null => {
     return null;
   }
   return value.toUpperCase();
+};
+
+const resolveSubscriptionPayload = (payload: any) => {
+  const rawObject = payload?.data?.object;
+  if (!rawObject) return null;
+
+  const candidate = rawObject.subscription ?? rawObject;
+  const planVariationId = candidate?.planVariationId ?? candidate?.plan_variation_id;
+  const customerId = candidate?.customerId ?? candidate?.customer_id;
+  if (!planVariationId || !customerId) {
+    return null;
+  }
+
+  return {
+    subscriptionId: candidate?.id ?? candidate?.subscriptionId ?? null,
+    planVariationId: String(planVariationId),
+    customerId: String(customerId),
+    status: candidate?.status ?? null,
+    chargedThroughDate: candidate?.chargedThroughDate ?? candidate?.charged_through_date ?? null,
+  };
 };
 
 const getOrderContext = async (orderId: string): Promise<SquareOrderContext> => {
@@ -422,6 +445,52 @@ const handleSquareWebhook = async (req: Request, res: Response) => {
     } catch (dbError: unknown) { // Explicitly type dbError as unknown
       console.error('Square Webhook: Database error updating wallet:', dbError);
       return res.status(500).json({ message: 'Internal server error during wallet update.' });
+    }
+  }
+
+  const isSubscriptionEvent = typeof type === 'string' && type.toLowerCase().startsWith('subscription.');
+  if (isSubscriptionEvent && VIP_PLAN_VARIATION_ID) {
+    const subscription = resolveSubscriptionPayload(payload);
+    if (subscription && subscription.planVariationId === VIP_PLAN_VARIATION_ID) {
+      try {
+        let user = await User.findOne({ squareCustomerId: subscription.customerId });
+        if (!user) {
+          try {
+            const customerResponse = await squareClient.customers.get({ customerId: subscription.customerId });
+            const email = customerResponse.customer?.emailAddress?.toLowerCase();
+            if (email) {
+              user = await User.findOne({ email });
+              if (user && !user.squareCustomerId) {
+                user.squareCustomerId = subscription.customerId;
+              }
+            }
+          } catch (lookupError) {
+            console.warn('Square Webhook: Failed to resolve customer for subscription webhook.', lookupError);
+          }
+        }
+
+        if (user) {
+          const status = normalizeVipStatus(subscription.status);
+          user.vipStatus = status;
+          if (subscription.subscriptionId) {
+            user.vipSubscriptionId = subscription.subscriptionId;
+          }
+
+          const resolvedExpiry = resolveVipExpiry(subscription.chargedThroughDate);
+          if (resolvedExpiry) {
+            user.vipExpiresAt = resolvedExpiry;
+          }
+          if (status === 'ACTIVE' && !user.vipSince) {
+            user.vipSince = new Date();
+          }
+
+          await user.save();
+          return res.status(200).json({ message: 'VIP subscription webhook processed.' });
+        }
+      } catch (error) {
+        console.error('Square Webhook: Failed to update VIP subscription status.', error);
+        return res.status(500).json({ message: 'Failed to update VIP subscription status.' });
+      }
     }
   }
 

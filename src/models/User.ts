@@ -35,6 +35,30 @@ const userSchema = new Schema({
     type: String,
     default: '/avatars/default.svg',
   },
+  vipStatus: {
+    type: String,
+    enum: ['NONE', 'PENDING', 'ACTIVE', 'PAUSED', 'CANCELED', 'DEACTIVATED', 'COMPLETED'],
+    default: 'NONE',
+    index: true,
+  },
+  vipSince: {
+    type: Date,
+    default: null,
+  },
+  vipExpiresAt: {
+    type: Date,
+    default: null,
+  },
+  vipSubscriptionId: {
+    type: String,
+    default: null,
+    index: true,
+  },
+  squareCustomerId: {
+    type: String,
+    default: null,
+    index: true,
+  },
   role: {
     type: String,
     enum: USER_ROLES,

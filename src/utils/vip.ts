@@ -35,20 +35,23 @@ export const resolveVipExpiry = (rawDate?: Date | string | null): Date | null =>
 
 export const isVipActive = (status?: VipStatus | string | null, expiresAt?: Date | string | null): boolean => {
   const normalized = normalizeVipStatus(status);
-  if (!VIP_ACTIVE_STATUSES.has(normalized)) {
-    return false;
+  const resolvedExpiry = resolveVipExpiry(expiresAt);
+
+  if (VIP_ACTIVE_STATUSES.has(normalized)) {
+    if (!resolvedExpiry) {
+      return true;
+    }
+    return resolvedExpiry.getTime() >= Date.now();
   }
 
-  if (!expiresAt) {
-    return true;
+  if (normalized === 'CANCELED') {
+    if (!resolvedExpiry) {
+      return false;
+    }
+    return resolvedExpiry.getTime() >= Date.now();
   }
 
-  const resolved = resolveVipExpiry(expiresAt);
-  if (!resolved) {
-    return true;
-  }
-
-  return resolved.getTime() >= Date.now();
+  return false;
 };
 
 export const buildVipPayload = (user: { vipStatus?: VipStatus | string | null; vipExpiresAt?: Date | null }) => {

@@ -99,6 +99,7 @@ router.post('/register', async (req: Request, res: Response) => {
       isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
       vipStatus: vipPayload.vipStatus,
       vipExpiresAt: vipPayload.vipExpiresAt,
+      vipSince: user.vipSince ?? null,
       isVip: vipPayload.isVip,
     });
   } catch (error) {
@@ -157,6 +158,7 @@ router.post('/login', async (req: Request, res: Response) => {
       isAdmin: roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin'),
       vipStatus: vipPayload.vipStatus,
       vipExpiresAt: vipPayload.vipExpiresAt,
+      vipSince: user.vipSince ?? null,
       isVip: vipPayload.isVip,
     });
   } catch (error) {

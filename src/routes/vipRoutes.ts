@@ -95,10 +95,23 @@ router.post('/checkout', authMiddleware, async (req: Request, res: Response) => 
       return res.status(500).json({ message: 'Square location is not configured or accessible for this access token.' });
     }
 
+    const vipPriceCents = Number(process.env.SQUARE_VIP_PRICE_CENTS || '499');
+    if (!Number.isFinite(vipPriceCents) || vipPriceCents <= 0) {
+      return res.status(500).json({ message: 'VIP subscription price is not configured.' });
+    }
+
     const frontendBaseUrl = FRONTEND_URL.replace(/\/$/, '');
     const checkoutResponse = await squareClient.checkout.paymentLinks.create({
       idempotencyKey: randomUUID(),
       description: `ReemTeam VIP subscription for ${user.username}`,
+      quickPay: {
+        name: 'ReemTeam VIP Membership',
+        priceMoney: {
+          amount: BigInt(Math.round(vipPriceCents)),
+          currency: 'USD',
+        },
+        locationId,
+      },
       checkoutOptions: {
         subscriptionPlanId: vipPlanId,
         redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success&paymentType=vip`,

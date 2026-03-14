@@ -94,6 +94,33 @@ const applySubscriptionToUser = (user: UserDocument, subscription: any) => {
   }
 };
 
+const syncVipStatusFromSquare = async (user: UserDocument, vipPlanId: string) => {
+  if (!user.squareCustomerId) {
+    return { synced: false };
+  }
+
+  const response = await squareClient.subscriptions.search({
+    query: {
+      filter: {
+        customerIds: [user.squareCustomerId],
+      },
+    },
+    limit: 25,
+  });
+
+  const subscriptions = (response.subscriptions ?? []).filter(
+    (subscription) => subscription?.planVariationId === vipPlanId
+  );
+  const candidate = pickSubscriptionCandidate(subscriptions);
+  if (!candidate) {
+    return { synced: false };
+  }
+
+  applySubscriptionToUser(user, candidate);
+  await user.save();
+  return { synced: true };
+};
+
 const resolveSquareLocationId = async (): Promise<string | null> => {
   const configuredLocationId = (process.env.SQUARE_LOCATION_ID || '').trim();
 
@@ -232,16 +259,60 @@ router.get('/status', authMiddleware, async (req: Request, res: Response) => {
     return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
   }
 
-  const user = await User.findById(userId).select('vipStatus vipExpiresAt vipSince');
+  const user = await User.findById(userId).select('vipStatus vipExpiresAt vipSince squareCustomerId');
   if (!user) {
     return res.status(404).json({ message: 'User not found.' });
+  }
+
+  const shouldSync = req.query?.sync === 'true' || req.query?.sync === '1';
+  let synced = false;
+  if (shouldSync) {
+    const vipPlanId = getVipPlanId();
+    if (vipPlanId) {
+      try {
+        const syncResult = await syncVipStatusFromSquare(user, vipPlanId);
+        synced = syncResult.synced;
+      } catch (error) {
+        console.warn('VIP status sync failed.', error);
+      }
+    }
   }
 
   const payload = buildVipPayload(user);
   return res.status(200).json({
     ...payload,
     vipSince: user.vipSince ?? null,
+    synced,
   });
+});
+
+router.post('/sync', authMiddleware, async (req: Request, res: Response) => {
+  const userId = (req.user as any)?.id;
+  if (!userId) {
+    return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
+  }
+
+  const vipPlanId = getVipPlanId();
+  if (!vipPlanId) {
+    return res.status(500).json({ message: 'VIP subscription plan is not configured.' });
+  }
+
+  try {
+    const user = await User.findById(userId).select('vipStatus vipExpiresAt vipSince squareCustomerId');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    const syncResult = await syncVipStatusFromSquare(user, vipPlanId);
+    const payload = buildVipPayload(user);
+    return res.status(200).json({
+      ...payload,
+      vipSince: user.vipSince ?? null,
+      synced: syncResult.synced,
+    });
+  } catch (error: unknown) {
+    return handleSquareError(res, error, 'Error syncing VIP status:');
+  }
 });
 
 router.post('/cancel', authMiddleware, async (req: Request, res: Response) => {

@@ -1,5 +1,5 @@
 import { Schema, model, Types, HydratedDocument, InferSchemaType } from 'mongoose';
-import { RTC_DAILY_MINIMUM } from '../config/economy';
+import { RTC_DAILY_MINIMUM, RTC_STARTING_BALANCE } from '../config/economy';
 
 const earningSchema = new Schema({
   matchId: { type: Schema.Types.ObjectId, required: true },
@@ -23,7 +23,7 @@ const walletSchema = new Schema({
   rtcBalance: {
     type: Number,
     required: true,
-    default: 0,
+    default: RTC_STARTING_BALANCE,
     min: 0,
   },
   lastRtcRefill: {
@@ -76,7 +76,7 @@ walletSchema.pre('save', function syncLegacyUsdBalance() {
   }
 
   if (typeof wallet.rtcBalance !== 'number' || Number.isNaN(wallet.rtcBalance)) {
-    wallet.rtcBalance = RTC_DAILY_MINIMUM;
+    wallet.rtcBalance = wallet.isNew ? RTC_STARTING_BALANCE : RTC_DAILY_MINIMUM;
   }
 
   if (!(wallet.lastRtcRefill instanceof Date) || Number.isNaN(wallet.lastRtcRefill.getTime())) {

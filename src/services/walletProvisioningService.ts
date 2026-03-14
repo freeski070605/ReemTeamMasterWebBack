@@ -1,5 +1,5 @@
 import { Types } from 'mongoose';
-import { RTC_DAILY_MINIMUM } from '../config/economy';
+import { RTC_DAILY_MINIMUM, RTC_STARTING_BALANCE } from '../config/economy';
 import User from '../models/User';
 import Wallet, { WalletDocument } from '../models/Wallet';
 
@@ -21,7 +21,7 @@ const isFiniteNumber = (value: unknown): value is number =>
 const buildWalletDefaults = (userId: Types.ObjectId, now: Date = new Date()) => ({
   userId,
   usdBalance: 0,
-  rtcBalance: RTC_DAILY_MINIMUM,
+  rtcBalance: RTC_STARTING_BALANCE,
   lastRtcRefill: now,
   availableBalance: 0,
   pendingWithdrawals: 0,

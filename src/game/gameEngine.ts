@@ -871,9 +871,7 @@ export const playerHitSpread = async (
   if (hittingPlayerIndex === -1) {
     throw new Error(`Hitting player ${hittingPlayerId} not found.`);
   }
-  if (hittingPlayerId === targetPlayerId) {
-    throw new Error('You can only hit another player\'s spread.');
-  }
+  const isSelfHit = hittingPlayerId === targetPlayerId;
   assertActiveTurnAction(gameState, hittingPlayerIndex, hittingPlayerId, 'hit');
   const hittingPlayer = gameState.players[hittingPlayerIndex];
   if (!hittingPlayer.hasDrawnThisTurn) {
@@ -921,24 +919,36 @@ export const playerHitSpread = async (
   const updatedTargetPlayerSpreads = [...targetPlayer.spreads];
   updatedTargetPlayerSpreads[targetSpreadIndex] = updatedTargetSpread;
 
-  const alreadyHitThisTurn = targetPlayer.lastHitAppliedOnTurn === gameState.turn;
-  const lockIncrease = alreadyHitThisTurn
-    ? 0
-    : (targetPlayer.hitLockCounter > 0 ? 1 : 2);
-  const updatedTargetLockCounter = targetPlayer.hitLockCounter + lockIncrease;
-
   const updatedPlayers = [...gameState.players];
-  targetPlayer = {
-    ...targetPlayer,
-    spreads: updatedTargetPlayerSpreads,
-    isHitLocked: updatedTargetLockCounter > 0,
-    hitLockCounter: updatedTargetLockCounter,
-    lastHitAppliedOnTurn: gameState.turn,
+  const updatedHittingPlayer = {
+    ...hittingPlayer,
+    hand: sortHandCards(updatedHittingHand),
+    hasTakenActionThisTurn: true,
   };
 
-  const updatedHittingPlayer = { ...hittingPlayer, hand: sortHandCards(updatedHittingHand), hasTakenActionThisTurn: true };
-  updatedPlayers[hittingPlayerIndex] = updatedHittingPlayer;
-  updatedPlayers[targetPlayerIndex] = targetPlayer;
+  if (isSelfHit) {
+    updatedPlayers[hittingPlayerIndex] = {
+      ...updatedHittingPlayer,
+      spreads: updatedTargetPlayerSpreads,
+    };
+  } else {
+    const alreadyHitThisTurn = targetPlayer.lastHitAppliedOnTurn === gameState.turn;
+    const lockIncrease = alreadyHitThisTurn
+      ? 0
+      : (targetPlayer.hitLockCounter > 0 ? 1 : 2);
+    const updatedTargetLockCounter = targetPlayer.hitLockCounter + lockIncrease;
+
+    targetPlayer = {
+      ...targetPlayer,
+      spreads: updatedTargetPlayerSpreads,
+      isHitLocked: updatedTargetLockCounter > 0,
+      hitLockCounter: updatedTargetLockCounter,
+      lastHitAppliedOnTurn: gameState.turn,
+    };
+
+    updatedPlayers[hittingPlayerIndex] = updatedHittingPlayer;
+    updatedPlayers[targetPlayerIndex] = targetPlayer;
+  }
 
   const updatedGameState: IGameState = {
     ...gameState,

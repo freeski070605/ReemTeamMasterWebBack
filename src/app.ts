@@ -15,6 +15,7 @@ import analyticsRoutes from './routes/analyticsRoutes';
 import inviteRoutes from './routes/inviteRoutes';
 import lobbyRoutes from './routes/lobbyRoutes';
 import vipRoutes from './routes/vipRoutes';
+import rgeRoutes from './routes/rgeRoutes';
 import authMiddleware from './middleware/auth'; // Import auth middleware
 import { corsOptions } from './config/cors';
 
@@ -52,6 +53,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/invites', inviteRoutes);
 app.use('/api/lobby', lobbyRoutes);
 app.use('/api/vip', vipRoutes);
+app.use('/api/rge', rgeRoutes);
 
 // Protected route example
 app.get('/api/protected', authMiddleware, (req, res) => {

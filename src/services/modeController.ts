@@ -13,6 +13,8 @@ import TournamentTicket from '../models/TournamentTicket';
 import { logLedgerEntry } from './ledgerService';
 import { RtcEconomyService } from './rtcEconomyService';
 import { ContestService } from './contestService';
+import User from '../models/User';
+import { resolveUserRole, roleAtLeast } from '../constants/roles';
 
 interface RoundSettlementData {
   winnerPayout: number;
@@ -306,19 +308,43 @@ export class ModeController {
     const humanPlayers = gameState.players.filter((player) => !player.isAI);
     const hasAI = gameState.players.some((player) => player.isAI);
 
+    const table = await Table.findById(gameState.tableId).select('isPromo');
+    const isPromo = table?.isPromo ?? false;
+
+    const humanPlayerIds = humanPlayers.map((p) => p.userId);
+    const humanUsers = await User.find({ _id: { $in: humanPlayerIds } }).select(
+      'role isAdmin'
+    );
+    const hasAdmin = humanUsers.some((user) =>
+      roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin')
+    );
+
     switch (mode) {
       case GameMode.FREE_RTC_TABLE:
-        if (humanPlayers.length < 1) {
-          throw new Error('At least one human player is required to start this mode.');
-        }
-        if (gameState.players.length < 2) {
-          throw new Error('FREE_RTC_TABLE requires at least two seated players.');
+        if (isPromo && hasAdmin) {
+          // No player checks for promo tables with an admin
+        } else {
+          if (humanPlayers.length < 1) {
+            throw new Error(
+              'At least one human player is required to start this mode.'
+            );
+          }
+          if (gameState.players.length < 2) {
+            throw new Error(
+              'FREE_RTC_TABLE requires at least two seated players.'
+            );
+          }
         }
         for (const player of humanPlayers) {
-          await RtcEconomyService.rtcAnte(player.userId, gameState.baseStake, mode, {
-            referenceType: 'free_rtc_round_entry',
-            referenceId: roundReference,
-          });
+          await RtcEconomyService.rtcAnte(
+            player.userId,
+            gameState.baseStake,
+            mode,
+            {
+              referenceType: 'free_rtc_round_entry',
+              referenceId: roundReference,
+            }
+          );
         }
         break;
       case GameMode.RTC_TOURNAMENT:

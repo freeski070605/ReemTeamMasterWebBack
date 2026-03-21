@@ -4,11 +4,13 @@ import { DEFAULT_GAME_MODE, GameMode } from '../domain/gameMode';
 interface ITablePlayer {
   userId: Types.ObjectId;
   isAI: boolean;
+  seat: number;
 }
 
 const playerSchema = new Schema<ITablePlayer>({
   userId: { type: Schema.Types.ObjectId, required: true },
-  isAI: { type: Boolean, required: true }
+  isAI: { type: Boolean, required: true },
+  seat: { type: Number, required: true },
 }, { _id: false });
 
 const tableSchema = new Schema({

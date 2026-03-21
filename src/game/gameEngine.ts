@@ -437,6 +437,7 @@ export const loadGameState = async (tableId: string): Promise<IGameState | null>
 export const nextTurn = (gameState: IGameState): IGameState => {
   const endedTurnPlayerIndex = gameState.currentPlayerIndex;
   const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
+  console.log(`[TURN] Advancing turn from player ${endedTurnPlayerIndex} to ${nextPlayerIndex}`);
   const turnDurationMs = gameState.turnDurationMs ?? DEFAULT_TURN_DURATION_MS;
   const turnStartTime = Date.now();
   const updatedPlayers = gameState.players.map((player, index) => {

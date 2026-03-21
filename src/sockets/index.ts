@@ -409,10 +409,27 @@ const addAIPlayers = async (table: TableDocument, currentPlayers: Array<{ userId
     const aiUsername = `AI_Player_${Math.random().toString(36).substring(7)}`;
     updatedPlayers.push({ userId: aiUserId, username: aiUsername, isAI: true });
     
-    // Add AI player to table in MongoDB (optional, can be done once at game start for persistence)
-    table.players.push({ userId: new mongoose.Types.ObjectId(aiUserId), isAI: true } as any);
-    table.currentPlayerCount++;
+    // Find an empty seat for the AI
+    let aiSeatIndex = -1;
+    for (let i = 0; i < table.maxPlayers; i++) {
+      const isSeatTaken = table.players.some(p => p?.seat === i);
+      if (!isSeatTaken) {
+        aiSeatIndex = i;
+        break;
+      }
+    }
+
+    if (aiSeatIndex !== -1) {
+        // Add AI player to table in MongoDB (optional, can be done once at game start for persistence)
+        table.players.push({ 
+            userId: new mongoose.Types.ObjectId(aiUserId), 
+            isAI: true,
+            seat: aiSeatIndex
+        } as any);
+        table.currentPlayerCount++;
+    }
   }
+  table.players.sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0));
   await table.save();
   return updatedPlayers;
 };
@@ -784,14 +801,32 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
       for (let i = 0; i < aiToAdd; i++) {
         const aiUserId = new mongoose.Types.ObjectId().toString();
         const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
-        table.players.push({ userId: new mongoose.Types.ObjectId(aiUserId), isAI: true } as any);
-        table.currentPlayerCount++;
-        await redisClient.hSet(
-          `table:${tableId}:players`,
-          aiUserId,
-          JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null })
-        );
+        
+        // Find an empty seat for the AI
+        let aiSeatIndex = -1;
+        for (let i = 0; i < table.maxPlayers; i++) {
+          const isSeatTaken = table.players.some(p => p?.seat === i);
+          if (!isSeatTaken) {
+            aiSeatIndex = i;
+            break;
+          }
+        }
+
+        if (aiSeatIndex !== -1) {
+            table.players.push({ 
+                userId: new mongoose.Types.ObjectId(aiUserId), 
+                isAI: true,
+                seat: aiSeatIndex
+            } as any);
+            table.currentPlayerCount++;
+            await redisClient.hSet(
+              `table:${tableId}:players`,
+              aiUserId,
+              JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null })
+            );
+        }
       }
+      table.players.sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0));
       await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
       await table.save();
       playersWithDetails = await buildPlayersWithUsernames(table, tableId);
@@ -807,6 +842,7 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
 
     const nextDealerIndex =
       (previousGameState.currentDealerIndex + 1) % Math.max(1, playersWithDetails.length);
+    console.log(`[DEALER] Dealer rotating from ${previousGameState.currentDealerIndex} to ${nextDealerIndex}`);
     let newGameState = await initializeRoundWithEconomy(table, playersWithDetails, { dealerIndex: nextDealerIndex });
     await saveGameState(newGameState);
     await emitWalletBalanceUpdates(io, tableId, newGameState);
@@ -957,6 +993,7 @@ const handleAITurn = async (io: Server, tableId: string) => {
 };
 
 const handlePlayerLeave = async (io: Server, tableId: string, userId: string, username: string) => {
+  console.log(`[LEAVE] Handling player leave for ${username} (${userId}) from table ${tableId}`);
   const lockKey = `lock:table:${tableId}`;
   const lockAcquired = await redisClient.set(lockKey, "locked", {
     NX: true,
@@ -1117,7 +1154,7 @@ const setupSocketHandlers = (io: Server) => {
       inviteCode?: string;
       spectator?: boolean;
     }) => {
-      console.log(`User ${username} (${userId}) attempting to join table ${tableId}`);
+      console.log(`[JOIN] User ${username} (${userId}) attempting to join table ${tableId}`);
       let table = await Table.findById(tableId);
       if (!table) {
         return socket.emit("gameError", { message: "Table not found." });
@@ -1259,7 +1296,32 @@ const setupSocketHandlers = (io: Server) => {
       }
 
       // Add player to table in MongoDB
-      table.players.push({ userId: new mongoose.Types.ObjectId(userId), isAI: false } as any);
+      const playerObject = { userId: new mongoose.Types.ObjectId(userId), isAI: false };
+
+      // Find the first empty seat
+      let seatIndex = -1;
+      for (let i = 0; i < table.maxPlayers; i++) {
+        const isSeatTaken = table.players.some(p => p?.seat === i);
+        if (!isSeatTaken) {
+          seatIndex = i;
+          break;
+        }
+      }
+
+      if (seatIndex === -1) {
+        // This should be caught by the maxPlayers check earlier, but as a safeguard
+        return socket.emit("gameError", { message: "Table is full (no seats available)." });
+      }
+
+      // Assign seat and add player
+      (playerObject as any).seat = seatIndex;
+      table.players.push(playerObject as any);
+
+      console.log(`[JOIN] User ${username} (${userId}) assigned to seat ${seatIndex} at table ${tableId}`);
+
+      // Sort players by seat index to ensure clockwise order
+      table.players.sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0));
+      
       table.currentPlayerCount++;
       // Update Redis for table occupancy
       await redisClient.hSet(`table:${tableId}:players`, userId, JSON.stringify({ username, isAI: false, avatarUrl: avatarUrl ?? null }));
@@ -1289,13 +1351,30 @@ const setupSocketHandlers = (io: Server) => {
           const aiUserId = new mongoose.Types.ObjectId().toString();
           const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
           
-          // Add to MongoDB
-          table.players.push({ userId: new mongoose.Types.ObjectId(aiUserId), isAI: true } as any);
-          table.currentPlayerCount++;
-          
-          // Add to Redis
-          await redisClient.hSet(`table:${tableId}:players`, aiUserId, JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null }));
-          await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
+          // Find an empty seat for the AI
+          let aiSeatIndex = -1;
+          for (let i = 0; i < table.maxPlayers; i++) {
+            const isSeatTaken = table.players.some(p => p?.seat === i);
+            if (!isSeatTaken) {
+              aiSeatIndex = i;
+              break;
+            }
+          }
+
+          if (aiSeatIndex !== -1) {
+               // Add to MongoDB
+               table.players.push({ 
+                   userId: new mongoose.Types.ObjectId(aiUserId), 
+                   isAI: true,
+                   seat: aiSeatIndex 
+               } as any);
+               table.currentPlayerCount++;
+               table.players.sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0));
+               
+               // Add to Redis
+               await redisClient.hSet(`table:${tableId}:players`, aiUserId, JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null }));
+               await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
+          }
       }
 
       let playersInTable = await buildPlayersWithUsernames(table, tableId);
@@ -1407,7 +1486,7 @@ const setupSocketHandlers = (io: Server) => {
 
     // Event: Player leaves a table (or disconnects)
     socket.on("leaveTable", async ({ tableId, userId, username }: { tableId: string; userId: string; username: string }) => {
-      console.log(`[leaveTable] User ${username} (${userId}) leaving table ${tableId}`);
+      console.log(`[LEAVE] User ${username} (${userId}) leaving table ${tableId}`);
       
       const gameState = await loadGameState(tableId);
       if (gameState && gameState.status === 'in-progress') {

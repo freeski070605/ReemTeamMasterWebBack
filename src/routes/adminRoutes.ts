@@ -22,6 +22,7 @@ import { loadGameState } from '../game/gameEngine';
 import { logLedgerEntry } from '../services/ledgerService';
 import { redisClient } from '../config/redis';
 import { USER_ROLES, isUserRole, resolveUserRole, roleAtLeast } from '../constants/roles';
+import { GameMode } from '../domain/gameMode';
 
 const router = Router();
 
@@ -30,6 +31,8 @@ const MAX_ADMIN_NOTE_LENGTH = 500;
 const MAX_BALANCE_ADJUSTMENT = 100_000;
 const TABLE_STATUS_FILTERS = ['all', 'in-game', 'waiting'] as const;
 const ADMIN_WALLET_ADJUST_CURRENCIES = ['USD', 'RTC'] as const;
+const PROMO_TABLE_NAME = 'Promo Content Table';
+const PROMO_AI_NAMES = ['Promo Ace', 'Promo Blaze', 'Promo Cash', 'Promo Drift'] as const;
 
 type TableStatusFilter = typeof TABLE_STATUS_FILTERS[number];
 type AdminWalletAdjustCurrency = typeof ADMIN_WALLET_ADJUST_CURRENCIES[number];
@@ -145,6 +148,7 @@ const serializeAdminTable = async (table: any) => {
     mode: table.mode,
     stake: table.stake,
     status: table.status,
+    isPromo: !!table.isPromo,
     minPlayers: table.minPlayers,
     maxPlayers: table.maxPlayers,
     currentPlayerCount: table.currentPlayerCount,
@@ -156,9 +160,11 @@ const serializeAdminTable = async (table: any) => {
           username: player.username,
           isAI: player.isAI,
         }))
-      : table.players.map((player: any) => ({
+      : table.players.map((player: any, index: number) => ({
           userId: player.userId.toString(),
-          username: player.isAI ? `AI_${player.userId.toString().slice(-4)}` : `User_${player.userId.toString().slice(-6)}`,
+          username: player.isAI
+            ? (table.isPromo ? PROMO_AI_NAMES[index] ?? `AI_${player.userId.toString().slice(-4)}` : `AI_${player.userId.toString().slice(-4)}`)
+            : `User_${player.userId.toString().slice(-6)}`,
           isAI: player.isAI,
         })),
     currentPot: gameState?.pot ?? null,
@@ -207,6 +213,59 @@ const resetTableRuntimeState = async (
   await redisClient.del(`table:${tableId}:players:leaving`);
   await redisClient.del(`game:${tableId}`);
   await redisClient.hSet(`table:${tableId}`, 'currentPlayerCount', '0');
+};
+
+const buildPromoAiPlayers = (table: any) => {
+  const existingAiIds = Array.isArray(table.players)
+    ? table.players
+        .filter((player: any) => player?.isAI && player?.userId)
+        .map((player: any) => player.userId.toString())
+    : [];
+
+  return PROMO_AI_NAMES.map((username, index) => ({
+    userId: existingAiIds[index] ?? new mongoose.Types.ObjectId().toString(),
+    username,
+    isAI: true,
+    avatarUrl: null as string | null,
+  }));
+};
+
+const seedPromoTableState = async (table: any) => {
+  const aiPlayers = buildPromoAiPlayers(table);
+  table.name = PROMO_TABLE_NAME;
+  table.mode = GameMode.FREE_RTC_TABLE;
+  table.isPrivate = true;
+  table.isPromo = true;
+  table.minPlayers = 4;
+  table.maxPlayers = 4;
+  table.players = aiPlayers.map((player) => ({
+    userId: new mongoose.Types.ObjectId(player.userId),
+    isAI: true,
+  }));
+  table.currentPlayerCount = aiPlayers.length;
+  table.status = 'waiting';
+  table.currentMatchId = undefined;
+  table.activeContestId = undefined;
+  await table.save();
+
+  await redisClient.del(`table:${table._id}:players`);
+  await redisClient.del(`table:${table._id}:players:leaving`);
+  await Promise.all(
+    aiPlayers.map((player) =>
+      redisClient.hSet(
+        `table:${table._id}:players`,
+        player.userId,
+        JSON.stringify({
+          username: player.username,
+          isAI: true,
+          avatarUrl: null,
+        })
+      )
+    )
+  );
+  await redisClient.hSet(`table:${table._id}`, 'currentPlayerCount', String(aiPlayers.length));
+
+  return table;
 };
 
 router.use(authMiddleware);
@@ -891,6 +950,106 @@ router.get('/tables/live', requireAdmin, async (_req: Request, res: Response) =>
     return res.status(500).json({ message: error?.message || 'Failed to fetch live tables.' });
   }
 });
+
+router.get('/tables/promo', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const table = await Table.findOne({ isPromo: true }).sort({ updatedAt: -1, createdAt: -1 });
+    if (!table) {
+      return res.status(200).json({ table: null });
+    }
+
+    return res.status(200).json({
+      table: await serializeAdminTable(table),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ message: error?.message || 'Failed to load promo table.' });
+  }
+});
+
+router.post(
+  '/tables/promo/ensure',
+  requireAdmin,
+  auditLogger({
+    action: 'table.promo.ensure',
+    targetType: 'table',
+    resolveTargetId: (_req, res) => res.locals.auditTargetId ?? null,
+    captureBefore: async () => {
+      const table = await Table.findOne({ isPromo: true }).sort({ updatedAt: -1, createdAt: -1 });
+      return table
+        ? {
+            tableId: table._id.toString(),
+            status: table.status,
+            currentPlayerCount: table.currentPlayerCount,
+            isPromo: !!table.isPromo,
+          }
+        : null;
+    },
+    captureAfter: (_req, res) => res.locals.auditAfterState ?? null,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      let table = await Table.findOne({ isPromo: true }).sort({ updatedAt: -1, createdAt: -1 });
+      const shouldReset = req.body?.reset === true;
+
+      if (!table) {
+        table = new Table({
+          name: PROMO_TABLE_NAME,
+          stake: 1,
+          mode: GameMode.FREE_RTC_TABLE,
+          isPrivate: true,
+          isPromo: true,
+          minPlayers: 4,
+          maxPlayers: 4,
+          currentPlayerCount: 0,
+          players: [],
+          status: 'waiting',
+        });
+      } else if (shouldReset) {
+        await resetTableRuntimeState(table, false);
+      }
+
+      if (!table) {
+        throw new Error('Promo table could not be initialized.');
+      }
+      const promoTable = table;
+
+      const currentGameState = promoTable.isNew ? null : await loadGameState(promoTable._id.toString());
+      const aiCount = Array.isArray(promoTable.players) ? promoTable.players.filter((player: any) => player?.isAI).length : 0;
+      const needsSeed =
+        shouldReset ||
+        !currentGameState ||
+        aiCount !== PROMO_AI_NAMES.length ||
+        promoTable.maxPlayers !== 4 ||
+        !promoTable.isPromo;
+
+      if (needsSeed) {
+        table = await seedPromoTableState(promoTable);
+      } else {
+        promoTable.name = PROMO_TABLE_NAME;
+        promoTable.isPrivate = true;
+        promoTable.isPromo = true;
+        await promoTable.save();
+        table = promoTable;
+      }
+
+      const resolvedTable = table!;
+      const serialized = await serializeAdminTable(resolvedTable);
+      res.locals.auditTargetId = resolvedTable._id.toString();
+      res.locals.auditAfterState = {
+        tableId: serialized.tableId,
+        status: serialized.status,
+        currentPlayerCount: serialized.currentPlayerCount,
+        isPromo: serialized.isPromo,
+      };
+
+      return res.status(200).json({
+        table: serialized,
+      });
+    } catch (error: any) {
+      return res.status(500).json({ message: error?.message || 'Failed to provision promo table.' });
+    }
+  }
+);
 
 router.post(
   '/tables/:tableId/reset',

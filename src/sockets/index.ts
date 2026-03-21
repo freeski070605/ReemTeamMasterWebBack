@@ -15,16 +15,20 @@ import { ensureWalletForUser } from "../services/walletProvisioningService";
 import Invite from "../models/Invite";
 import { PresenceService } from "../services/presenceService";
 import { RecentPlayerService } from "../services/recentPlayerService";
+import { resolveUserRole, roleAtLeast } from "../constants/roles";
 
 // Define a type for our socket with custom properties
 interface CustomSocket extends Socket {
   userId?: string; // Or the actual user ID type from your User schema
   username?: string;
   tableId?: string; // The table the player is currently in
+  spectatorTableId?: string;
+  isSpectator?: boolean;
 }
 
 const ROUND_READY_DURATION_MS = 30000;
 const TURN_DURATION_MS = DEFAULT_TURN_DURATION_MS;
+const PROMO_AI_COUNT = 4;
 const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
 const turnExpiryTimers = new Map<string, NodeJS.Timeout>();
 const roundCurrency = (value: number): number => Math.round(value * 100) / 100;
@@ -327,6 +331,48 @@ const buildPlayersWithUsernames = async (
   }
 
   return players;
+};
+
+const ensurePromoGameState = async (
+  io: Server,
+  table: TableDocument
+): Promise<IGameState> => {
+  const tableId = table._id.toString();
+  const existingState = await loadGameState(tableId);
+  if (existingState) {
+    return existingState;
+  }
+
+  const promoPlayers = (await buildPlayersWithUsernames(table, tableId)).filter((player) => player.isAI);
+  if (promoPlayers.length !== PROMO_AI_COUNT || promoPlayers.length !== table.players.length) {
+    throw new Error("Promo table must have exactly 4 AI players.");
+  }
+
+  table.status = "in-game";
+  table.currentPlayerCount = promoPlayers.length;
+  table.minPlayers = PROMO_AI_COUNT;
+  table.maxPlayers = PROMO_AI_COUNT;
+  table.isPrivate = true;
+  table.isPromo = true;
+  table.currentMatchId = new mongoose.Types.ObjectId();
+  await table.save();
+  await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", String(promoPlayers.length));
+
+  let gameState = await initializeRoundWithEconomy(table, promoPlayers);
+  await saveGameState(gameState);
+
+  if (gameState.status === "round-end") {
+    gameState = await settleRoundAndBroadcast(io, tableId, gameState);
+  } else {
+    io.to(tableId).emit("tableUpdate", {
+      message: "Promo table live.",
+      table,
+      gameState,
+    });
+  }
+
+  runTurnLoop(io, tableId, gameState);
+  return gameState;
 };
 
 // Helper to add AI players
@@ -1037,6 +1083,7 @@ const setupSocketHandlers = (io: Server) => {
       avatarUrl,
       contestId,
       inviteCode,
+      spectator,
     }: {
       tableId: string;
       userId: string;
@@ -1044,6 +1091,7 @@ const setupSocketHandlers = (io: Server) => {
       avatarUrl?: string;
       contestId?: string;
       inviteCode?: string;
+      spectator?: boolean;
     }) => {
       console.log(`User ${username} (${userId}) attempting to join table ${tableId}`);
       let table = await Table.findById(tableId);
@@ -1055,6 +1103,40 @@ const setupSocketHandlers = (io: Server) => {
 
       if (!table.mode) {
         table.mode = tableMode;
+      }
+
+      if (spectator) {
+        const viewer = await User.findById(userId).select("role isAdmin");
+        const viewerRole = viewer ? resolveUserRole(viewer.role, !!viewer.isAdmin) : "user";
+        if (!viewer || !roleAtLeast(viewerRole, "admin")) {
+          return socket.emit("gameError", { message: "Admin access is required to spectate this table." });
+        }
+        if (!table.isPromo) {
+          return socket.emit("gameError", { message: "Spectator mode is only available for promo tables." });
+        }
+
+        socket.join(tableId);
+        socket.userId = userId;
+        socket.username = username;
+        socket.isSpectator = true;
+        socket.spectatorTableId = tableId;
+        socket.tableId = undefined;
+        await PresenceService.markOnline(userId);
+        void emitLobbyPresence(io);
+
+        try {
+          const promoGameState = await ensurePromoGameState(io, table);
+          io.to(socket.id).emit("initialGameState", promoGameState);
+          const roundResult = toEngineRoundResult(promoGameState);
+          if (roundResult) {
+            io.to(socket.id).emit("roundResult", roundResult);
+          }
+          return;
+        } catch (error: any) {
+          return socket.emit("gameError", {
+            message: error?.message || "Unable to start promo spectator session.",
+          });
+        }
       }
 
       // Check if player is already in the table
@@ -1087,6 +1169,8 @@ const setupSocketHandlers = (io: Server) => {
       if (existingPlayer) {
         console.log(`User ${username} (${userId}) is already in table ${tableId}. Rejoining.`);
         socket.join(tableId);
+        socket.isSpectator = false;
+        socket.spectatorTableId = undefined;
         socket.tableId = tableId;
         socket.userId = userId;
         socket.username = username;
@@ -1159,6 +1243,8 @@ const setupSocketHandlers = (io: Server) => {
       // Join the socket room immediately so the player receives updates even if the game starts immediately
       socket.join(tableId);
       console.log(`Socket ${socket.id} explicitly joined room ${tableId} (Pre-game check)`);
+      socket.isSpectator = false;
+      socket.spectatorTableId = undefined;
       socket.tableId = tableId;
       socket.userId = userId;
       socket.username = username;
@@ -1524,7 +1610,7 @@ const setupSocketHandlers = (io: Server) => {
 
     socket.on("disconnect", async () => {
       console.log(`[disconnect] User disconnected: ${socket.id}`);
-      if (socket.tableId && socket.userId && socket.username) {
+      if (!socket.isSpectator && socket.tableId && socket.userId && socket.username) {
         await handlePlayerLeave(io, socket.tableId, socket.userId, socket.username);
       }
       void emitLobbyPresence(io, true);

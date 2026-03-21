@@ -37,7 +37,9 @@ const router = express.Router();
 router.get('/', async (req, res) => {
   try {
     const includePrivate = req.query.includePrivate === 'true';
-    const query = includePrivate ? {} : { isPrivate: { $ne: true } };
+    const query = includePrivate
+      ? { isPromo: { $ne: true } }
+      : { isPrivate: { $ne: true }, isPromo: { $ne: true } };
     const tables = await Table.find(query).sort({ stake: 1 }); // Sort by stake, ascending
     res.json(tables);
   } catch (error) {
@@ -119,6 +121,7 @@ router.post('/private', authMiddleware, async (req, res) => {
       players: [],
       status: 'waiting',
       isPrivate: true,
+      isPromo: false,
       createdBy: (req.user as any)?.id,
     });
     await table.save();

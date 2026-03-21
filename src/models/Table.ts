@@ -34,6 +34,12 @@ const tableSchema = new Schema({
     default: false,
     index: true,
   },
+  isPromo: {
+    type: Boolean,
+    required: true,
+    default: false,
+    index: true,
+  },
   createdBy: {
     type: Schema.Types.ObjectId,
     ref: 'User',
@@ -81,6 +87,7 @@ export interface ITable {
   stake: number;
   mode: GameMode;
   isPrivate: boolean;
+  isPromo: boolean;
   createdBy?: Types.ObjectId;
   minPlayers: number;
   maxPlayers: number;

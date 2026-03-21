@@ -69,9 +69,17 @@ const calculateRoundSettlement = (gameState: IGameState): RoundSettlementData =>
   switch (roundEndedBy) {
     case 'REGULAR':
     case 'DECK_EMPTY':
-    case 'REEM':
       winnerPayout = pot;
       break;
+    case 'REEM': {
+      // All players already ante'd one stake into the pot. Reem means +1 additional stake from each loser.
+      const penaltyAmount = baseStake;
+      winnerPayout = pot + (penaltyAmount * losers.length);
+      losers.forEach((loser) => {
+        penalties.push({ playerId: loser.userId, amount: penaltyAmount });
+      });
+      break;
+    }
     case 'AUTO_TRIPLE': {
       // All players already ante'd one stake into the pot. Triple means +2 additional stakes from each loser.
       const penaltyAmount = baseStake * 2;

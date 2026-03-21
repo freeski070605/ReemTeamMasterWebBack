@@ -296,7 +296,7 @@ const settleUsdContestRound = async (
 };
 
 export class ModeController {
-  static async applyRoundEntryEconomy(gameState: IGameState): Promise<IGameState> {
+  static async applyRoundEntryEconomy(gameState: IGameState, adminUserId?: string): Promise<IGameState> {
     if (gameState.roundEntryApplied) {
       return gameState;
     }
@@ -311,14 +311,26 @@ export class ModeController {
     const table = await Table.findById(gameState.tableId).select('isPromo');
     const isPromo = table?.isPromo ?? false;
 
-    const humanPlayerIds = humanPlayers.map((p) => p.userId);
-    const humanUsers = await User.find({ _id: { $in: humanPlayerIds } }).select(
-      'role isAdmin'
-    );
-    console.log("DEBUG: Checking for admin users", humanUsers.map(u => ({ id: u._id, role: u.role, isAdmin: u.isAdmin })));
-    const hasAdmin = humanUsers.some((user) =>
-      roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin')
-    );
+    let hasAdmin = false;
+    if (adminUserId) {
+      const adminUser = await User.findById(adminUserId).select('role isAdmin');
+      if (adminUser) {
+        hasAdmin = roleAtLeast(resolveUserRole(adminUser.role, !!adminUser.isAdmin), 'admin');
+      }
+    }
+
+    if (!hasAdmin) {
+      const humanPlayerIds = humanPlayers.map((p) => p.userId);
+      if (humanPlayerIds.length > 0) {
+        const humanUsers = await User.find({ _id: { $in: humanPlayerIds } }).select(
+          'role isAdmin'
+        );
+        console.log("DEBUG: Checking for admin users", humanUsers.map(u => ({ id: u._id, role: u.role, isAdmin: u.isAdmin })));
+        hasAdmin = humanUsers.some((user) =>
+          roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin')
+        );
+      }
+    }
 
     console.log("DEBUG: applyRoundEntryEconomy", { isPromo, hasAdmin, humanPlayers: humanPlayers.length });
 

@@ -209,10 +209,11 @@ const emitWalletBalanceUpdates = async (io: Server, tableId: string, gameState: 
 const initializeRoundWithEconomy = async (
   table: TableDocument,
   players: Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }>,
-  options?: { dealerIndex?: number }
+  options?: { dealerIndex?: number },
+  adminUserId?: string
 ): Promise<IGameState> => {
   const initializedState = await initializeGame(table, players, options);
-  return ModeController.applyRoundEntryEconomy(initializedState);
+  return ModeController.applyRoundEntryEconomy(initializedState, adminUserId);
 };
 
 const settleRoundAndBroadcast = async (
@@ -335,7 +336,8 @@ const buildPlayersWithUsernames = async (
 
 const ensurePromoGameState = async (
   io: Server,
-  table: TableDocument
+  table: TableDocument,
+  spectatorUserId?: string
 ): Promise<IGameState> => {
   const tableId = table._id.toString();
   const existingState = await loadGameState(tableId);
@@ -380,7 +382,7 @@ const ensurePromoGameState = async (
   await table.save();
   await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", String(promoPlayers.length));
 
-  let gameState = await initializeRoundWithEconomy(table, promoPlayers);
+  let gameState = await initializeRoundWithEconomy(table, promoPlayers, undefined, spectatorUserId);
   await saveGameState(gameState);
 
   if (gameState.status === "round-end") {
@@ -1148,7 +1150,7 @@ const setupSocketHandlers = (io: Server) => {
         void emitLobbyPresence(io);
 
         try {
-          const promoGameState = await ensurePromoGameState(io, table);
+          const promoGameState = await ensurePromoGameState(io, table, userId);
           io.to(socket.id).emit("initialGameState", promoGameState);
           const roundResult = toEngineRoundResult(promoGameState);
           if (roundResult) {

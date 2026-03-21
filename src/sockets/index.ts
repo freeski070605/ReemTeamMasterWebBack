@@ -343,9 +343,31 @@ const ensurePromoGameState = async (
     return existingState;
   }
 
-  const promoPlayers = (await buildPlayersWithUsernames(table, tableId)).filter((player) => player.isAI);
-  if (promoPlayers.length !== PROMO_AI_COUNT || promoPlayers.length !== table.players.length) {
-    throw new Error("Promo table must have exactly 4 AI players.");
+  const allPlayers = await buildPlayersWithUsernames(table, tableId);
+  const humanPlayerIds = allPlayers
+    .filter((player) => !player.isAI)
+    .map((player) => player.userId);
+
+  const adminUserIds = new Set<string>();
+  if (humanPlayerIds.length > 0) {
+    const humanUsers = await User.find({ _id: { $in: humanPlayerIds } }).select("role isAdmin");
+    humanUsers.forEach((user) => {
+      if (roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), "admin")) {
+        adminUserIds.add(user._id.toString());
+      }
+    });
+  }
+
+  const promoPlayers = allPlayers.filter(
+    (player) => player.isAI || adminUserIds.has(player.userId)
+  );
+
+  if (promoPlayers.length !== table.players.length) {
+    throw new Error("Promo tables are restricted to AI players and admins.");
+  }
+
+  if (table.players.length !== PROMO_AI_COUNT) {
+    throw new Error(`Promo tables must have exactly ${PROMO_AI_COUNT} players.`);
   }
 
   table.status = "in-game";

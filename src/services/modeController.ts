@@ -315,9 +315,12 @@ export class ModeController {
     const humanUsers = await User.find({ _id: { $in: humanPlayerIds } }).select(
       'role isAdmin'
     );
+    console.log("DEBUG: Checking for admin users", humanUsers.map(u => ({ id: u._id, role: u.role, isAdmin: u.isAdmin })));
     const hasAdmin = humanUsers.some((user) =>
       roleAtLeast(resolveUserRole(user.role, !!user.isAdmin), 'admin')
     );
+
+    console.log("DEBUG: applyRoundEntryEconomy", { isPromo, hasAdmin, humanPlayers: humanPlayers.length });
 
     switch (mode) {
       case GameMode.FREE_RTC_TABLE:

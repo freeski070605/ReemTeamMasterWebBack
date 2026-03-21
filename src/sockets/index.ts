@@ -1122,6 +1122,7 @@ const setupSocketHandlers = (io: Server) => {
       }
       const tableMode = (table.mode as GameMode | undefined)
         ?? ((contestId || table.activeContestId) ? GameMode.USD_CONTEST : GameMode.FREE_RTC_TABLE);
+      console.log(`DEBUG: joinTable: tableId=${tableId}, userId=${userId}, isPromo=${table.isPromo}, spectator=${!!spectator}`);
 
       if (!table.mode) {
         table.mode = tableMode;

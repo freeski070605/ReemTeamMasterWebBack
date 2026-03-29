@@ -238,9 +238,10 @@ const seedPromoTableState = async (table: any) => {
   table.isPromo = true;
   table.minPlayers = 4;
   table.maxPlayers = 4;
-  table.players = aiPlayers.map((player) => ({
+  table.players = aiPlayers.map((player, index) => ({
     userId: new mongoose.Types.ObjectId(player.userId),
     isAI: true,
+    seat: index,
   }));
   table.currentPlayerCount = aiPlayers.length;
   table.status = 'waiting';
@@ -1015,10 +1016,14 @@ router.post(
 
       const currentGameState = promoTable.isNew ? null : await loadGameState(promoTable._id.toString());
       const aiCount = Array.isArray(promoTable.players) ? promoTable.players.filter((player: any) => player?.isAI).length : 0;
+      const hasInvalidSeats = Array.isArray(promoTable.players)
+        ? promoTable.players.some((player: any, index: number) => !Number.isInteger(player?.seat) || player.seat !== index)
+        : false;
       const needsSeed =
         shouldReset ||
         !currentGameState ||
         aiCount !== PROMO_AI_NAMES.length ||
+        hasInvalidSeats ||
         promoTable.maxPlayers !== 4 ||
         !promoTable.isPromo;
 

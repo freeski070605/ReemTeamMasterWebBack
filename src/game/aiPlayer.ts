@@ -319,6 +319,104 @@ const chooseBestHit = (gameState: IGameState, aiPlayerId: string, hand: Card[]):
 const hasMandatorySpreadInHand = (hand: Card[]): boolean =>
   findPossibleSpreads(hand).some((spread) => !isAceOnlySpread(spread));
 
+const getRankClusterScore = (hand: Card[]): number => {
+  const rankCounts = new Map<CardRank, number>();
+
+  for (const card of hand) {
+    rankCounts.set(card.rank, (rankCounts.get(card.rank) ?? 0) + 1);
+  }
+
+  let score = 0;
+  rankCounts.forEach((count) => {
+    if (count >= 3) {
+      score += 48;
+    } else if (count === 2) {
+      score += 18;
+    }
+  });
+
+  return score;
+};
+
+const getRunClusterScore = (hand: Card[]): number => {
+  const suitBuckets = new Map<string, number[]>();
+
+  for (const card of hand) {
+    const ranks = suitBuckets.get(card.suit) ?? [];
+    ranks.push(getRankIndex(card.rank));
+    suitBuckets.set(card.suit, ranks);
+  }
+
+  let score = 0;
+
+  suitBuckets.forEach((ranks) => {
+    const sortedRanks = [...new Set(ranks)].sort((left, right) => left - right);
+
+    for (let index = 0; index < sortedRanks.length - 1; index++) {
+      const gap = sortedRanks[index + 1] - sortedRanks[index];
+
+      if (gap === 1) {
+        score += 12;
+      } else if (gap === 2) {
+        score += 5;
+      }
+    }
+
+    let runLength = 1;
+    for (let index = 0; index < sortedRanks.length - 1; index++) {
+      if (sortedRanks[index + 1] - sortedRanks[index] === 1) {
+        runLength += 1;
+      } else {
+        if (runLength >= 3) {
+          score += 24 + (runLength - 3) * 8;
+        }
+        runLength = 1;
+      }
+    }
+
+    if (runLength >= 3) {
+      score += 24 + (runLength - 3) * 8;
+    }
+  });
+
+  return score;
+};
+
+const getReemPotentialScore = (gameState: IGameState, aiPlayerId: string, hand: Card[]): number => {
+  const aiPlayer = gameState.players.find((player) => player.userId === aiPlayerId);
+  const spreadChoice = chooseBestSpread(gameState, aiPlayerId, hand);
+  const hitChoice = chooseBestHit(gameState, aiPlayerId, hand);
+  const hitReadyCount = hand.filter((card) => cardCanHitAnySpread(gameState, aiPlayerId, card)).length;
+
+  let score = 0;
+
+  if (spreadChoice) {
+    score += 40 + spreadChoice.cards.length * 10;
+  }
+
+  if (hitChoice) {
+    score += 26 + hitReadyCount * 6;
+  }
+
+  score += getRankClusterScore(hand);
+  score += getRunClusterScore(hand);
+  score += (aiPlayer?.spreads.length ?? 0) * 26;
+
+  if (hand.length <= 3) {
+    score += 10;
+  }
+
+  return score;
+};
+
+const shouldKeepPushingForReem = (gameState: IGameState, aiPlayerId: string, hand: Card[]): boolean => {
+  if (shouldDrawFromDiscard(gameState, aiPlayerId, hand)) {
+    return true;
+  }
+
+  return getReemPotentialScore(gameState, aiPlayerId, hand) >= 20;
+};
+
 const canSafelyDrop = (gameState: IGameState, aiPlayerId: string): boolean => {
   const aiPlayer = gameState.players.find((player) => player.userId === aiPlayerId);
   if (!aiPlayer || aiPlayer.isHitLocked || aiPlayer.hitLockCounter > 0) {
@@ -334,7 +432,11 @@ const canSafelyDrop = (gameState: IGameState, aiPlayerId: string): boolean => {
     .filter((player) => player.userId !== aiPlayerId)
     .reduce((lowest, player) => Math.min(lowest, calculateHandValue(player.hand)), Number.POSITIVE_INFINITY);
 
-  return aiHandValue < lowestOpponentScore;
+  if (aiHandValue >= lowestOpponentScore) {
+    return false;
+  }
+
+  return !shouldKeepPushingForReem(gameState, aiPlayerId, aiPlayer.hand);
 };
 
 const shouldDrawFromDiscard = (gameState: IGameState, aiPlayerId: string, hand: Card[]): boolean => {
@@ -386,12 +488,12 @@ export const getAIPlayerAction = (gameState: IGameState, aiPlayerId: string): AI
       return { type: 'declare41' };
     }
 
-    if (canSafelyDrop(gameState, aiPlayerId)) {
-      return { type: 'drop' };
-    }
-
     if (shouldDrawFromDiscard(gameState, aiPlayerId, aiHand)) {
       return { type: 'draw', payload: { source: 'discard' } };
+    }
+
+    if (canSafelyDrop(gameState, aiPlayerId)) {
+      return { type: 'drop' };
     }
 
     return { type: 'draw', payload: { source: 'deck' } };

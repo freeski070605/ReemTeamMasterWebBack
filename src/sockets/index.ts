@@ -935,7 +935,8 @@ const handleAITurn = async (io: Server, tableId: string) => {
            return;
 
         } else if (aiAction.type === 'draw') {
-           updatedGameState = await playerDrawCard(updatedGameState, currentPlayer.userId);
+           const drawSource = aiAction.payload?.source === 'discard' ? 'discard' : 'deck';
+           updatedGameState = await playerDrawCard(updatedGameState, currentPlayer.userId, drawSource);
            if (updatedGameState.status === 'round-end') {
               await settleRoundAndBroadcast(io, tableId, updatedGameState);
               return;
@@ -977,6 +978,24 @@ const handleAITurn = async (io: Server, tableId: string) => {
                runTurnLoop(io, tableId, updatedGameState);
                return;
              }
+        } else if (aiAction.type === 'hit') {
+            if (aiAction.payload?.card && aiAction.payload?.targetPlayerId !== undefined && aiAction.payload?.targetSpreadIndex !== undefined) {
+              updatedGameState = await playerHitSpread(
+                updatedGameState,
+                currentPlayer.userId,
+                aiAction.payload.card,
+                aiAction.payload.targetPlayerId,
+                aiAction.payload.targetSpreadIndex
+              );
+              if (updatedGameState.status === 'round-end') {
+                await settleRoundAndBroadcast(io, tableId, updatedGameState);
+                return;
+              }
+              await saveGameState(updatedGameState);
+              io.to(tableId).emit("gameStateUpdate", updatedGameState);
+              runTurnLoop(io, tableId, updatedGameState);
+              return;
+            }
         } else if (aiAction.type === 'drop') {
             updatedGameState = await playerDrop(updatedGameState, currentPlayer.userId);
             await settleRoundAndBroadcast(io, tableId, updatedGameState);

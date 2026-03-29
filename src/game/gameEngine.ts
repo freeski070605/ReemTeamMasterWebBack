@@ -824,7 +824,7 @@ export const playerSpreadCards = async (gameState: IGameState, userId: string, c
  * @param cardToAdd The card to add.
  * @returns True if the card can be added, false otherwise.
  */
-const canHitSpread = (spread: Card[], cardToAdd: Card): boolean => {
+export const canHitSpread = (spread: Card[], cardToAdd: Card): boolean => {
   if (spread.length === 0) return false;
 
   // Check for same rank spread (e.g., three 5s, adding a fourth 5)

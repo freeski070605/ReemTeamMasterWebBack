@@ -16,6 +16,7 @@ import Invite from "../models/Invite";
 import { PresenceService } from "../services/presenceService";
 import { RecentPlayerService } from "../services/recentPlayerService";
 import { resolveUserRole, roleAtLeast } from "../constants/roles";
+import { getAiAvatarUrl, getPromoAiProfile } from "../constants/promoAi";
 
 // Define a type for our socket with custom properties
 interface CustomSocket extends Socket {
@@ -36,6 +37,19 @@ const LOBBY_ROOM = "lobby";
 let lastPresenceBroadcastAt = 0;
 let lastLobbyOnlineCount: number | null = null;
 let lastLobbyConnectionCount: number | null = null;
+
+const getPromoAiIdentity = (index: number) => {
+  const profile = getPromoAiProfile(index);
+  return {
+    username: profile.username,
+    avatarUrl: profile.avatarUrl,
+  };
+};
+
+const getStandardAiIdentity = (userId: string, username: string) => ({
+  username,
+  avatarUrl: getAiAvatarUrl(userId),
+});
 
 const getLobbyConnectionCount = (io: Server) => {
   return io.sockets.adapter.rooms.get(LOBBY_ROOM)?.size ?? 0;
@@ -277,20 +291,24 @@ const buildPlayersWithUsernames = async (
   const players: Array<{ userId: string; username: string; isAI: boolean; avatarUrl?: string }> = [];
   const missingHumanIds: string[] = [];
 
-  for (const player of table.players) {
+  for (const [index, player] of table.players.entries()) {
     const userId = player.userId.toString();
     const redisEntry = redisPlayers[userId];
-    if (redisEntry) {
-      try {
-        const data = JSON.parse(redisEntry);
-        players.push({
-          userId,
-          username: data.username || `Player ${userId.substring(0, 4)}`,
-          isAI: player.isAI,
-          avatarUrl: data.avatarUrl,
-        });
-        continue;
-      } catch {
+    const promoIdentity = table.isPromo && player.isAI ? getPromoAiIdentity(index) : null;
+      if (redisEntry) {
+        try {
+          const data = JSON.parse(redisEntry);
+          const standardAiIdentity = !table.isPromo && player.isAI
+            ? getStandardAiIdentity(userId, data.username || `AI_${userId.substring(0, 4)}`)
+            : null;
+          players.push({
+            userId,
+            username: promoIdentity?.username ?? standardAiIdentity?.username ?? (data.username || `Player ${userId.substring(0, 4)}`),
+            isAI: player.isAI,
+            avatarUrl: promoIdentity?.avatarUrl ?? standardAiIdentity?.avatarUrl ?? data.avatarUrl,
+          });
+          continue;
+        } catch {
         // fall through to DB lookup/fallback
       }
     }
@@ -301,9 +319,9 @@ const buildPlayersWithUsernames = async (
 
     players.push({
       userId,
-      username: "",
+      username: promoIdentity?.username ?? (player.isAI ? getStandardAiIdentity(userId, "").username : ""),
       isAI: player.isAI,
-      avatarUrl: undefined,
+      avatarUrl: promoIdentity?.avatarUrl ?? (player.isAI ? getAiAvatarUrl(userId) : undefined),
     });
   }
 
@@ -323,11 +341,21 @@ const buildPlayersWithUsernames = async (
     }
   }
 
-  for (const player of players) {
+  for (const [index, player] of players.entries()) {
     if (!player.username) {
       player.username = player.isAI
-        ? `AI_${player.userId.substring(0, 4)}`
+        ? table.isPromo
+          ? getPromoAiIdentity(index).username
+          : `AI_${player.userId.substring(0, 4)}`
         : `Player ${player.userId.substring(0, 4)}`;
+    }
+
+    if (player.isAI && table.isPromo && !player.avatarUrl) {
+      player.avatarUrl = getPromoAiIdentity(index).avatarUrl;
+    }
+
+    if (player.isAI && !table.isPromo && !player.avatarUrl) {
+      player.avatarUrl = getAiAvatarUrl(player.userId);
     }
   }
 
@@ -342,6 +370,29 @@ const ensurePromoGameState = async (
   const tableId = table._id.toString();
   const existingState = await loadGameState(tableId);
   if (existingState) {
+    let didUpdateExistingState = false;
+    existingState.players = existingState.players.map((player, index) => {
+      if (!player.isAI) {
+        return player;
+      }
+
+      const promoIdentity = getPromoAiIdentity(index);
+      if (player.username === promoIdentity.username && player.avatarUrl === promoIdentity.avatarUrl) {
+        return player;
+      }
+
+      didUpdateExistingState = true;
+      return {
+        ...player,
+        username: promoIdentity.username,
+        avatarUrl: promoIdentity.avatarUrl,
+      };
+    });
+
+    if (didUpdateExistingState) {
+      await saveGameState(existingState);
+    }
+
     return existingState;
   }
 
@@ -407,7 +458,8 @@ const addAIPlayers = async (table: TableDocument, currentPlayers: Array<{ userId
   for (let i = 0; i < numAIPlayersToAdd; i++) {
     const aiUserId = new mongoose.Types.ObjectId().toString(); // Generate unique ID for AI
     const aiUsername = `AI_Player_${Math.random().toString(36).substring(7)}`;
-    updatedPlayers.push({ userId: aiUserId, username: aiUsername, isAI: true });
+    const aiIdentity = getStandardAiIdentity(aiUserId, aiUsername);
+    updatedPlayers.push({ userId: aiUserId, username: aiIdentity.username, isAI: true, avatarUrl: aiIdentity.avatarUrl });
     
     // Find an empty seat for the AI
     let aiSeatIndex = -1;
@@ -801,6 +853,7 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
       for (let i = 0; i < aiToAdd; i++) {
         const aiUserId = new mongoose.Types.ObjectId().toString();
         const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
+        const aiIdentity = getStandardAiIdentity(aiUserId, aiUsername);
         
         // Find an empty seat for the AI
         let aiSeatIndex = -1;
@@ -822,7 +875,7 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
             await redisClient.hSet(
               `table:${tableId}:players`,
               aiUserId,
-              JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null })
+              JSON.stringify({ username: aiIdentity.username, isAI: true, avatarUrl: aiIdentity.avatarUrl })
             );
         }
       }
@@ -1369,6 +1422,7 @@ const setupSocketHandlers = (io: Server) => {
           console.log(`Only 1 player in table ${tableId}, adding an AI opponent.`);
           const aiUserId = new mongoose.Types.ObjectId().toString();
           const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
+          const aiIdentity = getStandardAiIdentity(aiUserId, aiUsername);
           
           // Find an empty seat for the AI
           let aiSeatIndex = -1;
@@ -1391,7 +1445,7 @@ const setupSocketHandlers = (io: Server) => {
                table.players.sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0));
                
                // Add to Redis
-               await redisClient.hSet(`table:${tableId}:players`, aiUserId, JSON.stringify({ username: aiUsername, isAI: true, avatarUrl: null }));
+               await redisClient.hSet(`table:${tableId}:players`, aiUserId, JSON.stringify({ username: aiIdentity.username, isAI: true, avatarUrl: aiIdentity.avatarUrl }));
                await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());
           }
       }
@@ -1413,7 +1467,15 @@ const setupSocketHandlers = (io: Server) => {
         // Update Redis for any existing AI players (like the one added for 1v1)
         for (const player of playersInTable) {
           if (player.isAI) {
-            await redisClient.hSet(`table:${tableId}:players`, player.userId, JSON.stringify({ username: player.username, isAI: true, avatarUrl: null }));
+            await redisClient.hSet(
+              `table:${tableId}:players`,
+              player.userId,
+              JSON.stringify({
+                username: player.username,
+                isAI: true,
+                avatarUrl: player.avatarUrl ?? getAiAvatarUrl(player.userId),
+              })
+            );
           }
         }
         await redisClient.hSet(`table:${tableId}`, "currentPlayerCount", table.currentPlayerCount.toString());

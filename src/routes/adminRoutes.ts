@@ -23,6 +23,7 @@ import { logLedgerEntry } from '../services/ledgerService';
 import { redisClient } from '../config/redis';
 import { USER_ROLES, isUserRole, resolveUserRole, roleAtLeast } from '../constants/roles';
 import { GameMode } from '../domain/gameMode';
+import { PROMO_AI_NAMES, getPromoAiProfile } from '../constants/promoAi';
 
 const router = Router();
 
@@ -32,8 +33,6 @@ const MAX_BALANCE_ADJUSTMENT = 100_000;
 const TABLE_STATUS_FILTERS = ['all', 'in-game', 'waiting'] as const;
 const ADMIN_WALLET_ADJUST_CURRENCIES = ['USD', 'RTC'] as const;
 const PROMO_TABLE_NAME = 'Promo Content Table';
-const PROMO_AI_NAMES = ['Promo Ace', 'Promo Blaze', 'Promo Cash', 'Promo Drift'] as const;
-
 type TableStatusFilter = typeof TABLE_STATUS_FILTERS[number];
 type AdminWalletAdjustCurrency = typeof ADMIN_WALLET_ADJUST_CURRENCIES[number];
 
@@ -226,7 +225,7 @@ const buildPromoAiPlayers = (table: any) => {
     userId: existingAiIds[index] ?? new mongoose.Types.ObjectId().toString(),
     username,
     isAI: true,
-    avatarUrl: null as string | null,
+    avatarUrl: getPromoAiProfile(index).avatarUrl,
   }));
 };
 
@@ -259,7 +258,7 @@ const seedPromoTableState = async (table: any) => {
         JSON.stringify({
           username: player.username,
           isAI: true,
-          avatarUrl: null,
+          avatarUrl: player.avatarUrl,
         })
       )
     )

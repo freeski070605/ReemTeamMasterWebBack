@@ -33,9 +33,23 @@ const normalizeEmail = (value: unknown) => (
   typeof value === 'string' ? value.trim().toLowerCase() : ''
 );
 
-const getFrontendBaseUrl = () => (
-  (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '')
-);
+const getFrontendBaseUrl = () => {
+  const configured = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  const preferredUrl = configured.find((value) => {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  });
+
+  return (preferredUrl || 'http://localhost:3000').replace(/\/+$/, '');
+};
 
 const createPasswordResetToken = () => {
   const token = randomBytes(32).toString('hex');

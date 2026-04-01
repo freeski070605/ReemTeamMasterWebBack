@@ -28,6 +28,7 @@ interface CustomSocket extends Socket {
 }
 
 const ROUND_READY_DURATION_MS = 30000;
+const PROMO_ROUND_READY_DURATION_MS = 20000;
 const TURN_DURATION_MS = DEFAULT_TURN_DURATION_MS;
 const PROMO_AI_COUNT = 4;
 const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
@@ -499,6 +500,11 @@ const allRoundPlayersReady = (gameState: IGameState): boolean => {
   return gameState.players.every((player) => readySet.has(player.userId));
 };
 
+const resolveRoundReadyDurationMs = async (tableId: string): Promise<number> => {
+  const table = await Table.findById(tableId).select("isPromo");
+  return table?.isPromo ? PROMO_ROUND_READY_DURATION_MS : ROUND_READY_DURATION_MS;
+};
+
 const scheduleTurnExpiryTimer = (io: Server, tableId: string, gameState: IGameState) => {
   clearTurnExpiryTimer(tableId);
 
@@ -934,12 +940,13 @@ const beginRoundReadyPhase = async (io: Server, tableId: string, gameState: IGam
 
   clearRoundTransitionTimer(tableId);
   clearTurnExpiryTimer(tableId);
+  const roundReadyDurationMs = await resolveRoundReadyDurationMs(tableId);
 
   const aiReadyIds = gameState.players.filter((player) => player.isAI).map((player) => player.userId);
   const updatedGameState: IGameState = {
     ...gameState,
     roundReadyPlayerIds: aiReadyIds,
-    roundReadyDeadline: Date.now() + ROUND_READY_DURATION_MS,
+    roundReadyDeadline: Date.now() + roundReadyDurationMs,
   };
 
   await saveGameState(updatedGameState);
@@ -947,7 +954,7 @@ const beginRoundReadyPhase = async (io: Server, tableId: string, gameState: IGam
 
   const timer = setTimeout(() => {
     void executeRoundTransition(io, tableId);
-  }, ROUND_READY_DURATION_MS);
+  }, roundReadyDurationMs);
   roundTransitionTimers.set(tableId, timer);
 
   if (allRoundPlayersReady(updatedGameState)) {

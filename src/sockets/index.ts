@@ -500,9 +500,15 @@ const allRoundPlayersReady = (gameState: IGameState): boolean => {
   return gameState.players.every((player) => readySet.has(player.userId));
 };
 
-const resolveRoundReadyDurationMs = async (tableId: string): Promise<number> => {
+const resolveRoundReadyConfig = async (
+  tableId: string
+): Promise<{ durationMs: number; isPromo: boolean }> => {
   const table = await Table.findById(tableId).select("isPromo");
-  return table?.isPromo ? PROMO_ROUND_READY_DURATION_MS : ROUND_READY_DURATION_MS;
+  const isPromo = table?.isPromo ?? false;
+  return {
+    durationMs: isPromo ? PROMO_ROUND_READY_DURATION_MS : ROUND_READY_DURATION_MS,
+    isPromo,
+  };
 };
 
 const scheduleTurnExpiryTimer = (io: Server, tableId: string, gameState: IGameState) => {
@@ -940,7 +946,7 @@ const beginRoundReadyPhase = async (io: Server, tableId: string, gameState: IGam
 
   clearRoundTransitionTimer(tableId);
   clearTurnExpiryTimer(tableId);
-  const roundReadyDurationMs = await resolveRoundReadyDurationMs(tableId);
+  const { durationMs: roundReadyDurationMs, isPromo } = await resolveRoundReadyConfig(tableId);
 
   const aiReadyIds = gameState.players.filter((player) => player.isAI).map((player) => player.userId);
   const updatedGameState: IGameState = {
@@ -957,7 +963,7 @@ const beginRoundReadyPhase = async (io: Server, tableId: string, gameState: IGam
   }, roundReadyDurationMs);
   roundTransitionTimers.set(tableId, timer);
 
-  if (allRoundPlayersReady(updatedGameState)) {
+  if (!isPromo && allRoundPlayersReady(updatedGameState)) {
     await executeRoundTransition(io, tableId);
   }
 };

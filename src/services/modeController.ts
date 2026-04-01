@@ -336,8 +336,9 @@ export class ModeController {
 
     switch (mode) {
       case GameMode.FREE_RTC_TABLE:
-        if (isPromo && hasAdmin) {
-          // No player checks for promo tables with an admin
+        if (isPromo) {
+          // Promo tables are AI-driven capture rooms and should continue across rounds
+          // even when there is no seated human/admin inside the hand itself.
         } else {
           if (humanPlayers.length < 1) {
             throw new Error(

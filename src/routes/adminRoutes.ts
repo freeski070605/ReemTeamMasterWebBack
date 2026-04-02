@@ -18,6 +18,7 @@ import Match from '../models/Match';
 import Contest from '../models/Contest';
 import AdminAudit from '../models/AdminAudit';
 import { ensureWalletForUser } from '../services/walletProvisioningService';
+import { ContestService } from '../services/contestService';
 import { loadGameState } from '../game/gameEngine';
 import { logLedgerEntry } from '../services/ledgerService';
 import { redisClient } from '../config/redis';
@@ -179,6 +180,73 @@ const serializeAdminTable = async (table: any) => {
       : null,
     createdAt: table.createdAt,
     updatedAt: table.updatedAt,
+  };
+};
+
+const findContestByAnyId = async (contestId: string) => {
+  const byContestId = await Contest.findOne({ contestId });
+  if (byContestId) {
+    return byContestId;
+  }
+
+  if (isObjectId(contestId)) {
+    return Contest.findById(contestId);
+  }
+
+  return null;
+};
+
+const serializeAdminTournament = (contest: any) => ({
+  _id: contest._id.toString(),
+  contestId: contest.contestId,
+  mode: contest.mode,
+  entryFee: contest.entryFee,
+  playerCount: contest.playerCount,
+  prizePool: contest.prizePool,
+  platformFee: contest.platformFee,
+  status: contest.status,
+  payoutStructure: Array.isArray(contest.payoutStructure)
+    ? contest.payoutStructure.map((rule: any) => ({
+        rank: rule.rank,
+        amount: rule.amount,
+        percentage: rule.percentage,
+      }))
+    : [],
+  participants: Array.isArray(contest.participants)
+    ? contest.participants.map((participant: any) => participant.toString())
+    : [],
+  startedAt: contest.startedAt ?? null,
+  endedAt: contest.endedAt ?? null,
+  createdAt: contest.createdAt,
+  updatedAt: contest.updatedAt,
+});
+
+const parseTournamentPayload = (body: any) => {
+  const payoutStructure = Array.isArray(body?.payoutStructure)
+    ? body.payoutStructure
+        .map((rule: any) => {
+          const hasAmount = rule?.amount !== undefined && rule?.amount !== null && String(rule.amount).trim() !== '';
+          const hasPercentage = rule?.percentage !== undefined && rule?.percentage !== null && String(rule.percentage).trim() !== '';
+          return {
+            rank: Number(rule?.rank),
+            amount: hasAmount ? toSafeAmount(rule.amount, 'payout amount') : undefined,
+            percentage: hasPercentage ? toSafeAmount(rule.percentage, 'payout percentage') : undefined,
+          };
+        })
+        .filter((rule: any) => rule.amount !== undefined || rule.percentage !== undefined)
+    : undefined;
+
+  const rawStatus = typeof body?.status === 'string' ? body.status.trim() : undefined;
+
+  return {
+    entryFee: toSafeAmount(body?.entryFee, 'entryFee'),
+    playerCount: Number(body?.playerCount),
+    platformFee:
+      body?.platformFee !== undefined && body?.platformFee !== null && String(body.platformFee).trim() !== ''
+        ? toSafeAmount(body.platformFee, 'platformFee')
+        : undefined,
+    payoutStructure,
+    status: rawStatus || undefined,
   };
 };
 
@@ -1242,12 +1310,88 @@ router.get('/tournaments', requireAdmin, async (req: Request, res: Response) => 
     const tournaments = await Contest.find(query).sort({ createdAt: -1 }).limit(100);
     return res.status(200).json({
       total: tournaments.length,
-      tournaments,
+      tournaments: tournaments.map(serializeAdminTournament),
     });
   } catch (error: any) {
     return res.status(500).json({ message: error?.message || 'Failed to fetch tournaments.' });
   }
 });
+
+router.post(
+  '/tournaments',
+  requireAdmin,
+  auditLogger({
+    action: 'contest.create',
+    targetType: 'contest',
+    resolveTargetId: (_req, res) => res.locals.auditTargetId ?? null,
+    captureAfter: (_req, res) => res.locals.auditAfterState ?? null,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const payload = parseTournamentPayload(req.body);
+      const contest = await ContestService.createContest(payload);
+      const serialized = serializeAdminTournament(contest);
+      res.locals.auditTargetId = serialized.contestId;
+      res.locals.auditAfterState = serialized;
+      return res.status(201).json({ tournament: serialized });
+    } catch (error: any) {
+      return res.status(400).json({ message: error?.message || 'Failed to create tournament.' });
+    }
+  }
+);
+
+router.put(
+  '/tournaments/:contestId',
+  requireAdmin,
+  auditLogger({
+    action: 'contest.update',
+    targetType: 'contest',
+    resolveTargetId: (req) => getRouteParam(req.params.contestId),
+    captureBefore: async (req) => {
+      const contest = await findContestByAnyId(getRouteParam(req.params.contestId));
+      return contest ? serializeAdminTournament(contest) : null;
+    },
+    captureAfter: (_req, res) => res.locals.auditAfterState ?? null,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const contestId = getRouteParam(req.params.contestId);
+      const payload = parseTournamentPayload(req.body);
+      const contest = await ContestService.updateContest(contestId, payload);
+      const serialized = serializeAdminTournament(contest);
+      res.locals.auditTargetId = serialized.contestId;
+      res.locals.auditAfterState = serialized;
+      return res.status(200).json({ tournament: serialized });
+    } catch (error: any) {
+      return res.status(400).json({ message: error?.message || 'Failed to update tournament.' });
+    }
+  }
+);
+
+router.delete(
+  '/tournaments/:contestId',
+  requireAdmin,
+  auditLogger({
+    action: 'contest.delete',
+    targetType: 'contest',
+    resolveTargetId: (req) => getRouteParam(req.params.contestId),
+    captureBefore: async (req) => {
+      const contest = await findContestByAnyId(getRouteParam(req.params.contestId));
+      return contest ? serializeAdminTournament(contest) : null;
+    },
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const contestId = getRouteParam(req.params.contestId);
+      const deleted = await ContestService.deleteContest(contestId);
+      res.locals.auditTargetId = deleted.contestId;
+      res.locals.auditAfterState = null;
+      return res.status(200).json({ success: true, ...deleted });
+    } catch (error: any) {
+      return res.status(400).json({ message: error?.message || 'Failed to delete tournament.' });
+    }
+  }
+);
 
 router.get('/overview', requireAdmin, async (_req: Request, res: Response) => {
   try {

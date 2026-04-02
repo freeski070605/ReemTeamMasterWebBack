@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Contest, { ContestDocument } from '../models/Contest';
+import Table from '../models/Table';
 import TournamentTicket, { TournamentTicketDocument } from '../models/TournamentTicket';
 import { FinancialService } from './financialService';
 import { logLedgerEntry } from './ledgerService';
@@ -16,7 +17,13 @@ interface CreateContestInput {
   playerCount: number;
   platformFee?: number;
   payoutStructure?: Array<{ rank: number; amount?: number; percentage?: number }>;
+  status?: AdminMutableContestStatus;
 }
+
+type ContestPayoutInput = Array<{ rank: number; amount?: number; percentage?: number }>;
+
+export const ADMIN_MUTABLE_CONTEST_STATUSES = ['draft', 'open', 'locked', 'cancelled'] as const;
+export type AdminMutableContestStatus = typeof ADMIN_MUTABLE_CONTEST_STATUSES[number];
 
 const roundCurrency = (value: number): number => {
   return Math.round(value * 100) / 100;
@@ -44,6 +51,19 @@ const normalizePlatformFee = (platformFee: number | undefined, totalCollected: n
     throw new Error('platformFee cannot exceed total contest collection.');
   }
   return roundCurrency(fee);
+};
+
+const normalizeAdminMutableContestStatus = (
+  status: unknown,
+  defaultStatus: AdminMutableContestStatus
+): AdminMutableContestStatus => {
+  if (status === undefined || status === null || status === '') {
+    return defaultStatus;
+  }
+  if (typeof status !== 'string' || !ADMIN_MUTABLE_CONTEST_STATUSES.includes(status as AdminMutableContestStatus)) {
+    throw new Error(`status must be one of: ${ADMIN_MUTABLE_CONTEST_STATUSES.join(', ')}.`);
+  }
+  return status as AdminMutableContestStatus;
 };
 
 const findContest = async (contestIdOrDbId: string): Promise<ContestDocument | null> => {
@@ -86,7 +106,7 @@ const findTicketForUser = async (
 };
 
 const sanitizePayoutRules = (
-  payoutStructure: CreateContestInput['payoutStructure'],
+  payoutStructure: ContestPayoutInput | undefined,
   prizePool: number
 ): Array<{ rank: number; amount: number; percentage?: number }> => {
   if (!payoutStructure || payoutStructure.length === 0) {
@@ -134,6 +154,47 @@ const sanitizePayoutRules = (
     ...rule,
     amount: roundCurrency(rule.amount * scale),
   }));
+};
+
+const buildContestConfig = (input: {
+  entryFee: number;
+  playerCount: number;
+  platformFee?: number;
+  payoutStructure?: ContestPayoutInput;
+}) => {
+  const entryFee = roundCurrency(input.entryFee);
+  assertPositive(entryFee, 'entryFee');
+  const playerCount = normalizePlayerCount(input.playerCount);
+  const totalCollected = roundCurrency(entryFee * playerCount);
+  const platformFee = normalizePlatformFee(input.platformFee, totalCollected);
+  const prizePool = roundCurrency(totalCollected - platformFee);
+  const payoutStructure = sanitizePayoutRules(input.payoutStructure, prizePool);
+
+  return {
+    entryFee,
+    playerCount,
+    platformFee,
+    prizePool,
+    payoutStructure,
+  };
+};
+
+const arePayoutStructuresEqual = (
+  left: Array<{ rank: number; amount: number; percentage?: number }>,
+  right: Array<{ rank: number; amount: number; percentage?: number }>
+) => {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((rule, index) => {
+    const other = right[index];
+    return (
+      rule.rank === other.rank &&
+      roundCurrency(rule.amount) === roundCurrency(other.amount) &&
+      (rule.percentage ?? null) === (other.percentage ?? null)
+    );
+  });
 };
 
 const computePayoutMap = (
@@ -191,27 +252,103 @@ export class ContestService {
   }
 
   static async createContest(input: CreateContestInput) {
-    const entryFee = roundCurrency(input.entryFee);
-    assertPositive(entryFee, 'entryFee');
-    const playerCount = normalizePlayerCount(input.playerCount);
-    const totalCollected = roundCurrency(entryFee * playerCount);
-    const platformFee = normalizePlatformFee(input.platformFee, totalCollected);
-    const prizePool = roundCurrency(totalCollected - platformFee);
-
-    const payoutStructure = sanitizePayoutRules(input.payoutStructure, prizePool);
+    const { entryFee, playerCount, platformFee, prizePool, payoutStructure } = buildContestConfig(input);
     const contest = new Contest({
       mode: GameMode.USD_CONTEST,
       entryFee,
       playerCount,
       prizePool,
       platformFee,
-      status: 'open',
+      status: normalizeAdminMutableContestStatus(input.status, 'open'),
       payoutStructure,
       participants: [],
     });
 
     await contest.save();
     return contest;
+  }
+
+  static async updateContest(
+    contestId: string,
+    input: {
+      entryFee: number;
+      playerCount: number;
+      platformFee?: number;
+      payoutStructure?: ContestPayoutInput;
+      status?: AdminMutableContestStatus;
+    }
+  ) {
+    const contest = await findContest(contestId);
+    if (!contest) {
+      throw new Error('Contest not found.');
+    }
+    if (contest.status === 'in-progress' || contest.status === 'completed') {
+      throw new Error(`Contest cannot be edited from status "${contest.status}".`);
+    }
+
+    const nextConfig = buildContestConfig(input);
+    const nextStatus = normalizeAdminMutableContestStatus(input.status, contest.status as AdminMutableContestStatus);
+    const participantCount = contest.participants.length;
+    const economicsChanged =
+      roundCurrency(contest.entryFee) !== nextConfig.entryFee ||
+      contest.playerCount !== nextConfig.playerCount ||
+      roundCurrency(contest.platformFee) !== nextConfig.platformFee ||
+      roundCurrency(contest.prizePool) !== nextConfig.prizePool ||
+      !arePayoutStructuresEqual(
+        (contest.payoutStructure || []).map((rule: any) => ({
+          rank: rule.rank,
+          amount: roundCurrency(rule.amount),
+          percentage: rule.percentage,
+        })),
+        nextConfig.payoutStructure
+      );
+
+    if (participantCount > 0 && economicsChanged) {
+      throw new Error('Contest economics cannot be changed after players have joined.');
+    }
+
+    if (participantCount > 0 && nextStatus !== 'open' && nextStatus !== 'locked') {
+      throw new Error('Contests with participants can only move between open and locked.');
+    }
+
+    if (participantCount >= nextConfig.playerCount && nextStatus === 'open') {
+      throw new Error('Full contests cannot be reopened to open status.');
+    }
+
+    contest.entryFee = nextConfig.entryFee;
+    contest.playerCount = nextConfig.playerCount;
+    contest.platformFee = nextConfig.platformFee;
+    contest.prizePool = nextConfig.prizePool;
+    contest.payoutStructure = nextConfig.payoutStructure as any;
+    contest.status = nextStatus;
+    contest.startedAt = undefined;
+    contest.endedAt = undefined;
+
+    await contest.save();
+    return contest;
+  }
+
+  static async deleteContest(contestId: string) {
+    const contest = await findContest(contestId);
+    if (!contest) {
+      throw new Error('Contest not found.');
+    }
+    if (contest.status === 'in-progress' || contest.status === 'completed') {
+      throw new Error(`Contest cannot be deleted from status "${contest.status}".`);
+    }
+    if (contest.participants.length > 0) {
+      throw new Error('Contest cannot be deleted after players have joined.');
+    }
+
+    await Table.updateMany(
+      { activeContestId: contest.contestId },
+      { $unset: { activeContestId: 1 } }
+    );
+    await contest.deleteOne();
+
+    return {
+      contestId: contest.contestId,
+    };
   }
 
   static async joinContestWithUsd(contestId: string, userId: string) {

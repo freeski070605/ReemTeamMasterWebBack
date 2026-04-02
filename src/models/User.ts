@@ -54,10 +54,30 @@ const userSchema = new Schema({
     default: null,
     index: true,
   },
+  vipSubscriptionIds: {
+    sandbox: {
+      type: String,
+      default: null,
+    },
+    production: {
+      type: String,
+      default: null,
+    },
+  },
   squareCustomerId: {
     type: String,
     default: null,
     index: true,
+  },
+  squareCustomerIds: {
+    sandbox: {
+      type: String,
+      default: null,
+    },
+    production: {
+      type: String,
+      default: null,
+    },
   },
   role: {
     type: String,

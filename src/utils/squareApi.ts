@@ -9,6 +9,9 @@ dotenv.config();
 
 const SQUARE_ACCESS_TOKEN = (process.env.SQUARE_ACCESS_TOKEN || '').trim();
 const rawSquareEnvironment = (process.env.SQUARE_ENVIRONMENT || 'sandbox').trim().toLowerCase();
+const CURRENT_SQUARE_ENVIRONMENT = rawSquareEnvironment === 'production'
+  ? 'production'
+  : 'sandbox';
 const SQUARE_ENVIRONMENT = rawSquareEnvironment === 'production'
   ? SquareEnvironment.Production
   : SquareEnvironment.Sandbox;
@@ -23,4 +26,6 @@ const squareClient = new SquareClient({
   environment: SQUARE_ENVIRONMENT,
 });
 
-export { squareClient, ApiError, FRONTEND_URL, SQUARE_ENVIRONMENT };
+export type SquareEnvironmentName = typeof CURRENT_SQUARE_ENVIRONMENT;
+
+export { squareClient, ApiError, CURRENT_SQUARE_ENVIRONMENT, FRONTEND_URL, SQUARE_ENVIRONMENT };

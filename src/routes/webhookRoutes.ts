@@ -10,6 +10,11 @@ import { RTC_PURCHASE_BUNDLES } from '../config/economy';
 import { RtcEconomyService } from '../services/rtcEconomyService';
 import User from '../models/User';
 import { normalizeVipStatus, resolveVipExpiry } from '../utils/vip';
+import {
+  buildSquareCustomerLookupQuery,
+  setSquareCustomerIdForCurrentEnv,
+  setVipSubscriptionIdForCurrentEnv,
+} from '../utils/squareState';
 
 dotenv.config();
 
@@ -453,15 +458,15 @@ const handleSquareWebhook = async (req: Request, res: Response) => {
     const subscription = resolveSubscriptionPayload(payload);
     if (subscription && subscription.planVariationId === VIP_PLAN_VARIATION_ID) {
       try {
-        let user = await User.findOne({ squareCustomerId: subscription.customerId });
+        let user = await User.findOne(buildSquareCustomerLookupQuery(subscription.customerId));
         if (!user) {
           try {
             const customerResponse = await squareClient.customers.get({ customerId: subscription.customerId });
             const email = customerResponse.customer?.emailAddress?.toLowerCase();
             if (email) {
               user = await User.findOne({ email });
-              if (user && !user.squareCustomerId) {
-                user.squareCustomerId = subscription.customerId;
+              if (user) {
+                setSquareCustomerIdForCurrentEnv(user, subscription.customerId);
               }
             }
           } catch (lookupError) {
@@ -470,10 +475,11 @@ const handleSquareWebhook = async (req: Request, res: Response) => {
         }
 
         if (user) {
+          setSquareCustomerIdForCurrentEnv(user, subscription.customerId);
           const status = normalizeVipStatus(subscription.status);
           user.vipStatus = status;
           if (subscription.subscriptionId) {
-            user.vipSubscriptionId = subscription.subscriptionId;
+            setVipSubscriptionIdForCurrentEnv(user, subscription.subscriptionId);
           }
 
           const resolvedExpiry = resolveVipExpiry(subscription.chargedThroughDate);

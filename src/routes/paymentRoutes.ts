@@ -2,7 +2,8 @@ import { Router, Request, Response } from 'express';
 import { ApiError, FRONTEND_URL, squareClient } from '../utils/squareApi';
 import { randomUUID } from 'crypto';
 import authMiddleware from '../middleware/auth';
-import { RTC_PURCHASE_BUNDLES } from '../config/economy';
+import { RTC_PURCHASE_BUNDLES, RtcPurchaseBundle } from '../config/economy';
+import { isSquareAuthFailure, isSquareCatalogObjectNotFoundError } from '../utils/squareErrors';
 
 const router = Router();
 
@@ -67,12 +68,48 @@ const getRtcBundle = (bundleId: string) => {
   return RTC_PURCHASE_BUNDLES.find((bundle) => bundle.id === bundleId) || null;
 };
 
+const buildRtcLineItem = (bundle: RtcPurchaseBundle, includeCatalogObjectId: boolean) => ({
+  name: `${bundle.rtcAmount.toLocaleString('en-US')} RTC Bundle`,
+  quantity: '1',
+  basePriceMoney: {
+    amount: BigInt(Math.round(bundle.usdPrice * 100)),
+    currency: 'USD' as const,
+  },
+  ...(includeCatalogObjectId && bundle.squareCatalogObjectId
+    ? { catalogObjectId: bundle.squareCatalogObjectId }
+    : {}),
+});
+
+const createRtcPaymentLink = async (
+  bundle: RtcPurchaseBundle,
+  userIdString: string,
+  locationId: string,
+  frontendBaseUrl: string,
+  includeCatalogObjectId: boolean
+) => {
+  return squareClient.checkout.paymentLinks.create({
+    idempotencyKey: randomUUID(),
+    order: {
+      locationId,
+      referenceId: buildSquareReferenceId(userIdString, 'rtc_purchase'),
+      metadata: {
+        userId: userIdString,
+        purchaseType: 'rtc_bundle',
+        bundleId: bundle.id,
+      },
+      lineItems: [buildRtcLineItem(bundle, includeCatalogObjectId)],
+    },
+    checkoutOptions: {
+      redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success&paymentType=rtc&bundleId=${encodeURIComponent(bundle.id)}`,
+    },
+    paymentNote: `rtc_bundle:${bundle.id}:${userIdString}`,
+  });
+};
+
 const handleSquareError = (res: Response, error: unknown, fallbackMessage: string) => {
   if (error instanceof ApiError) {
     console.error('Square API Error:', error.errors);
-    const isSquareAuthFailure = error.statusCode === 401
-      || (error.errors ?? []).some((entry) => entry.category === 'AUTHENTICATION_ERROR');
-    if (isSquareAuthFailure) {
+    if (isSquareAuthFailure(error)) {
       const currentSquareEnvironment = (process.env.SQUARE_ENVIRONMENT || 'sandbox').trim().toLowerCase();
       return res.status(502).json({
         message: `Square credentials are invalid for ${currentSquareEnvironment}. Verify SQUARE_ACCESS_TOKEN and SQUARE_ENVIRONMENT (sandbox vs production).`,
@@ -146,7 +183,6 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
         errors: paymentLinkResponse.errors ?? [],
       });
     }
-
   } catch (error: unknown) {
     return handleSquareError(res, error, 'Error creating wallet checkout:');
   }
@@ -177,36 +213,31 @@ router.post('/create-rtc-checkout', authMiddleware, async (req: Request, res: Re
       return res.status(500).json({ message: 'Square location is not configured or accessible for this access token.' });
     }
 
-    const amountMinor = Math.round(bundle.usdPrice * 100);
-    const rtcLineItem = {
-      name: `${bundle.rtcAmount.toLocaleString('en-US')} RTC Bundle`,
-      quantity: '1',
-      basePriceMoney: {
-        amount: BigInt(amountMinor),
-        currency: 'USD' as const,
-      },
-      ...(bundle.squareCatalogObjectId
-        ? { catalogObjectId: bundle.squareCatalogObjectId }
-        : {}),
-    };
-
-    const paymentLinkResponse = await squareClient.checkout.paymentLinks.create({
-      idempotencyKey: randomUUID(),
-      order: {
+    let paymentLinkResponse;
+    try {
+      paymentLinkResponse = await createRtcPaymentLink(
+        bundle,
+        userIdString,
         locationId,
-        referenceId: buildSquareReferenceId(userIdString, 'rtc_purchase'),
-        metadata: {
-          userId: userIdString,
-          purchaseType: 'rtc_bundle',
-          bundleId: bundle.id,
-        },
-        lineItems: [rtcLineItem],
-      },
-      checkoutOptions: {
-        redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success&paymentType=rtc&bundleId=${encodeURIComponent(bundle.id)}`,
-      },
-      paymentNote: `rtc_bundle:${bundle.id}:${userIdString}`,
-    });
+        frontendBaseUrl,
+        true
+      );
+    } catch (error) {
+      if (bundle.squareCatalogObjectId && isSquareCatalogObjectNotFoundError(error)) {
+        console.warn(
+          `Square catalog object ${bundle.squareCatalogObjectId} is invalid for bundle ${bundle.id}. Retrying RTC checkout without catalogObjectId.`
+        );
+        paymentLinkResponse = await createRtcPaymentLink(
+          bundle,
+          userIdString,
+          locationId,
+          frontendBaseUrl,
+          false
+        );
+      } else {
+        throw error;
+      }
+    }
 
     const checkoutUrl = paymentLinkResponse.paymentLink?.url;
 

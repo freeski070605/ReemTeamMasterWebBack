@@ -1,4 +1,7 @@
 import { GameMode } from '../domain/gameMode';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 export const RTC_STARTING_BALANCE = 5000;
 export const RTC_DAILY_MINIMUM = 1000;
@@ -21,10 +24,30 @@ export interface RtcPurchaseBundle {
   squareCatalogObjectId?: string;
 }
 
+const readCatalogObjectId = (envVarName: string): string | undefined => {
+  const value = process.env[envVarName]?.trim();
+  return value ? value : undefined;
+};
+
 export const RTC_PURCHASE_BUNDLES: RtcPurchaseBundle[] = [
-  { id: 'bundle_4_99', usdPrice: 4.99, rtcAmount: 5000, squareCatalogObjectId:"FT5HLLSMSLBB2OFWG3B25GGS"},
-  { id: 'bundle_9_99', usdPrice: 9.99, rtcAmount: 12000, squareCatalogObjectId:"LD7I5MX6VZYYBEF2EMFL7F2Z" },
-  { id: 'bundle_19_99', usdPrice: 19.99, rtcAmount: 30000, squareCatalogObjectId:"QJ4AZKU6UI5W7J24RGERNGTI" },
+  {
+    id: 'bundle_4_99',
+    usdPrice: 4.99,
+    rtcAmount: 5000,
+    squareCatalogObjectId: readCatalogObjectId('SQUARE_RTC_BUNDLE_4_99_CATALOG_OBJECT_ID'),
+  },
+  {
+    id: 'bundle_9_99',
+    usdPrice: 9.99,
+    rtcAmount: 12000,
+    squareCatalogObjectId: readCatalogObjectId('SQUARE_RTC_BUNDLE_9_99_CATALOG_OBJECT_ID'),
+  },
+  {
+    id: 'bundle_19_99',
+    usdPrice: 19.99,
+    rtcAmount: 30000,
+    squareCatalogObjectId: readCatalogObjectId('SQUARE_RTC_BUNDLE_19_99_CATALOG_OBJECT_ID'),
+  },
 ];
 
 export const scaleStakeTierToRtc = (stakeTier: number): number => {

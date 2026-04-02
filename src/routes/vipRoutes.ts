@@ -4,6 +4,18 @@ import authMiddleware from '../middleware/auth';
 import User, { UserDocument } from '../models/User';
 import { squareClient, ApiError, FRONTEND_URL } from '../utils/squareApi';
 import { buildVipPayload, isVipActive, normalizeVipStatus, resolveVipExpiry } from '../utils/vip';
+import {
+  clearSquareStateForCurrentEnv,
+  getSquareCustomerIdForCurrentEnv,
+  getVipSubscriptionIdForCurrentEnv,
+  setSquareCustomerIdForCurrentEnv,
+  setVipSubscriptionIdForCurrentEnv,
+} from '../utils/squareState';
+import {
+  isSquareAuthFailure,
+  isSquareCustomerNotFoundError,
+  isSquareSubscriptionNotFoundError,
+} from '../utils/squareErrors';
 
 const router = Router();
 
@@ -15,6 +27,30 @@ const getVipPriceCents = (): number | null => {
     return null;
   }
   return Math.round(vipPriceCents);
+};
+
+const createSquareCustomerForUser = async (user: UserDocument): Promise<string | null> => {
+  const customerResponse = await squareClient.customers.create({
+    emailAddress: user.email,
+    givenName: user.username,
+    referenceId: user._id.toString(),
+    note: 'ReemTeam VIP subscriber',
+  });
+  const customerId = customerResponse.customer?.id ?? null;
+  if (customerId) {
+    setSquareCustomerIdForCurrentEnv(user, customerId);
+    await user.save();
+  }
+  return customerId;
+};
+
+const ensureSquareCustomerForCurrentEnv = async (user: UserDocument): Promise<string | null> => {
+  const customerId = getSquareCustomerIdForCurrentEnv(user);
+  if (customerId) {
+    return customerId;
+  }
+
+  return createSquareCustomerForUser(user);
 };
 
 const parseSubscriptionDate = (value?: string | null): number => {
@@ -47,33 +83,54 @@ const pickSubscriptionCandidate = (subscriptions: any[]) => {
   return [...subscriptions].sort(byRecency)[0];
 };
 
+const searchSubscriptionsForCurrentCustomer = async (user: UserDocument) => {
+  const customerId = getSquareCustomerIdForCurrentEnv(user);
+  if (!customerId) {
+    return null;
+  }
+
+  try {
+    const response = await squareClient.subscriptions.search({
+      query: {
+        filter: {
+          customerIds: [customerId],
+        },
+      },
+      limit: 25,
+    });
+
+    return response.subscriptions ?? [];
+  } catch (error) {
+    if (isSquareCustomerNotFoundError(error)) {
+      clearSquareStateForCurrentEnv(user);
+      await user.save();
+      return null;
+    }
+
+    throw error;
+  }
+};
+
 const resolveVipSubscriptionId = async (
   user: UserDocument,
   vipPlanId: string
 ): Promise<string | null> => {
-  if (user.vipSubscriptionId) {
-    return user.vipSubscriptionId;
+  const existingSubscriptionId = getVipSubscriptionIdForCurrentEnv(user);
+  if (existingSubscriptionId) {
+    return existingSubscriptionId;
   }
 
-  if (!user.squareCustomerId) {
+  const subscriptions = await searchSubscriptionsForCurrentCustomer(user);
+  if (!subscriptions) {
     return null;
   }
 
-  const response = await squareClient.subscriptions.search({
-    query: {
-      filter: {
-        customerIds: [user.squareCustomerId],
-      },
-    },
-    limit: 25,
-  });
-
-  const subscriptions = (response.subscriptions ?? []).filter(
+  const matchingSubscriptions = subscriptions.filter(
     (subscription) => subscription?.planVariationId === vipPlanId
   );
-  const candidate = pickSubscriptionCandidate(subscriptions);
+  const candidate = pickSubscriptionCandidate(matchingSubscriptions);
   if (candidate?.id) {
-    user.vipSubscriptionId = candidate.id;
+    setVipSubscriptionIdForCurrentEnv(user, candidate.id);
   }
   return candidate?.id ?? null;
 };
@@ -82,7 +139,7 @@ const applySubscriptionToUser = (user: UserDocument, subscription: any) => {
   const status = normalizeVipStatus(subscription?.status ?? undefined);
   user.vipStatus = status;
   if (subscription?.id) {
-    user.vipSubscriptionId = subscription.id;
+    setVipSubscriptionIdForCurrentEnv(user, subscription.id);
   }
 
   const resolvedExpiry = resolveVipExpiry(subscription?.chargedThroughDate ?? null);
@@ -95,23 +152,15 @@ const applySubscriptionToUser = (user: UserDocument, subscription: any) => {
 };
 
 const syncVipStatusFromSquare = async (user: UserDocument, vipPlanId: string) => {
-  if (!user.squareCustomerId) {
+  const subscriptions = await searchSubscriptionsForCurrentCustomer(user);
+  if (!subscriptions) {
     return { synced: false };
   }
 
-  const response = await squareClient.subscriptions.search({
-    query: {
-      filter: {
-        customerIds: [user.squareCustomerId],
-      },
-    },
-    limit: 25,
-  });
-
-  const subscriptions = (response.subscriptions ?? []).filter(
+  const matchingSubscriptions = subscriptions.filter(
     (subscription) => subscription?.planVariationId === vipPlanId
   );
-  const candidate = pickSubscriptionCandidate(subscriptions);
+  const candidate = pickSubscriptionCandidate(matchingSubscriptions);
   if (!candidate) {
     return { synced: false };
   }
@@ -154,9 +203,7 @@ const resolveSquareLocationId = async (): Promise<string | null> => {
 const handleSquareError = (res: Response, error: unknown, fallbackMessage: string) => {
   if (error instanceof ApiError) {
     console.error('Square API Error:', error.errors);
-    const isSquareAuthFailure = error.statusCode === 401
-      || (error.errors ?? []).some((entry) => entry.category === 'AUTHENTICATION_ERROR');
-    if (isSquareAuthFailure) {
+    if (isSquareAuthFailure(error)) {
       const currentSquareEnvironment = (process.env.SQUARE_ENVIRONMENT || 'sandbox').trim().toLowerCase();
       return res.status(502).json({
         message: `Square credentials are invalid for ${currentSquareEnvironment}. Verify SQUARE_ACCESS_TOKEN and SQUARE_ENVIRONMENT (sandbox vs production).`,
@@ -194,19 +241,7 @@ router.post('/checkout', authMiddleware, async (req: Request, res: Response) => 
       return res.status(409).json({ message: 'VIP subscription is already active.' });
     }
 
-    if (!user.squareCustomerId) {
-      const customerResponse = await squareClient.customers.create({
-        emailAddress: user.email,
-        givenName: user.username,
-        referenceId: user._id.toString(),
-        note: 'ReemTeam VIP subscriber',
-      });
-      const customerId = customerResponse.customer?.id ?? null;
-      if (customerId) {
-        user.squareCustomerId = customerId;
-        await user.save();
-      }
-    }
+    await ensureSquareCustomerForCurrentEnv(user);
 
     const locationId = await resolveSquareLocationId();
     if (!locationId) {
@@ -259,7 +294,9 @@ router.get('/status', authMiddleware, async (req: Request, res: Response) => {
     return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
   }
 
-  const user = await User.findById(userId).select('vipStatus vipExpiresAt vipSince squareCustomerId');
+  const user = await User.findById(userId).select(
+    'vipStatus vipExpiresAt vipSince squareCustomerId squareCustomerIds'
+  );
   if (!user) {
     return res.status(404).json({ message: 'User not found.' });
   }
@@ -298,7 +335,9 @@ router.post('/sync', authMiddleware, async (req: Request, res: Response) => {
   }
 
   try {
-    const user = await User.findById(userId).select('vipStatus vipExpiresAt vipSince squareCustomerId');
+    const user = await User.findById(userId).select(
+      'vipStatus vipExpiresAt vipSince squareCustomerId squareCustomerIds vipSubscriptionId vipSubscriptionIds'
+    );
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
     }
@@ -328,7 +367,7 @@ router.post('/cancel', authMiddleware, async (req: Request, res: Response) => {
 
   try {
     const user = await User.findById(userId).select(
-      'vipStatus vipExpiresAt vipSince vipSubscriptionId squareCustomerId'
+      'vipStatus vipExpiresAt vipSince vipSubscriptionId vipSubscriptionIds squareCustomerId squareCustomerIds'
     );
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
@@ -339,7 +378,18 @@ router.post('/cancel', authMiddleware, async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'No active VIP subscription found to cancel.' });
     }
 
-    const cancelResponse = await squareClient.subscriptions.cancel({ subscriptionId });
+    let cancelResponse;
+    try {
+      cancelResponse = await squareClient.subscriptions.cancel({ subscriptionId });
+    } catch (error) {
+      if (isSquareSubscriptionNotFoundError(error) || isSquareCustomerNotFoundError(error)) {
+        clearSquareStateForCurrentEnv(user);
+        await user.save();
+        return res.status(404).json({ message: 'No active VIP subscription found to cancel in the current Square environment.' });
+      }
+      throw error;
+    }
+
     if (cancelResponse.subscription) {
       applySubscriptionToUser(user, cancelResponse.subscription);
     }

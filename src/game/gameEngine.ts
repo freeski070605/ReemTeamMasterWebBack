@@ -6,7 +6,7 @@ import { DEFAULT_GAME_MODE, GameMode } from '../domain/gameMode';
 
 export type RoundEndType = 'REGULAR' | 'REEM' | 'AUTO_TRIPLE' | 'CAUGHT_DROP' | 'DECK_EMPTY';
 export type PlacementWinType = RoundEndType | 'LOSS';
-export const DEFAULT_TURN_DURATION_MS = 20_000;
+export const DEFAULT_TURN_DURATION_MS = 60_000;
 
 export interface IPlacement {
   userId: string;

@@ -122,6 +122,35 @@ export class FinancialService {
     return wallet;
   }
 
+  static async refundContestEntry(
+    userId: string,
+    amount: number,
+    contestId: string,
+    metadata: Record<string, unknown> = {}
+  ): Promise<WalletDocument> {
+    assertPositiveAmount(amount);
+
+    const wallet = await getWalletByUserId(userId);
+    wallet.usdBalance += amount;
+    wallet.availableBalance += amount; // Compatibility mirror during transition.
+    await wallet.save();
+
+    await logLedgerEntry({
+      userId,
+      currency: 'USD',
+      mode: GameMode.USD_CONTEST,
+      eventType: 'USD_CONTEST_REFUND',
+      direction: 'credit',
+      amount,
+      balanceAfter: wallet.usdBalance,
+      referenceType: 'contest',
+      referenceId: contestId,
+      metadata,
+    });
+
+    return wallet;
+  }
+
   static async payoutCredit(
     userId: string,
     amount: number,

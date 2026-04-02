@@ -1393,6 +1393,68 @@ router.delete(
   }
 );
 
+router.post(
+  '/tournaments/:contestId/refund',
+  requireAdmin,
+  auditLogger({
+    action: 'contest.refund',
+    targetType: 'contest',
+    resolveTargetId: (req) => getRouteParam(req.params.contestId),
+    captureBefore: async (req) => {
+      const contest = await findContestByAnyId(getRouteParam(req.params.contestId));
+      return contest ? serializeAdminTournament(contest) : null;
+    },
+    captureAfter: (_req, res) => res.locals.auditAfterState ?? null,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const actor = await getAuthenticatedAdminUser(req);
+      if (!actor) {
+        return res.status(401).json({ message: 'Unauthorized.' });
+      }
+
+      const contestId = getRouteParam(req.params.contestId);
+      const deleteAfterRefund = req.body?.deleteAfterRefund === true;
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+      const existingContest = await findContestByAnyId(contestId);
+      const boundTables = existingContest
+        ? await Table.find({ activeContestId: existingContest.contestId })
+        : [];
+
+      const result = await ContestService.refundContestEntries(contestId, {
+        refundedBy: actor.id,
+        reason,
+        deleteAfterRefund,
+      });
+
+      for (const table of boundTables) {
+        await resetTableRuntimeState(table, false);
+      }
+
+      res.locals.auditTargetId = result.contestId;
+      res.locals.auditAfterState = {
+        deleted: result.deleted,
+        refundedAmount: result.refundedAmount,
+        paidEntryCount: result.paidEntryCount,
+        refundedEntryCount: result.refundedEntryCount,
+        restoredTicketCount: result.restoredTicketCount,
+        alreadyRefundedCount: result.alreadyRefundedCount,
+        contest: result.contest ? serializeAdminTournament(result.contest) : null,
+      };
+
+      return res.status(200).json({
+        message: result.deleted
+          ? 'Tournament refunded and deleted.'
+          : 'Tournament refunded and cancelled.',
+        ...result,
+        contest: result.contest ? serializeAdminTournament(result.contest) : null,
+      });
+    } catch (error: any) {
+      return res.status(400).json({ message: error?.message || 'Failed to refund tournament.' });
+    }
+  }
+);
+
 router.get('/overview', requireAdmin, async (_req: Request, res: Response) => {
   try {
     const [users, admins, finance, moderators, tables, pendingWithdrawals] = await Promise.all([

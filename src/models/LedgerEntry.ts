@@ -8,6 +8,7 @@ export type LedgerEventType =
   | 'USD_DEPOSIT'
   | 'USD_WITHDRAWAL'
   | 'USD_CONTEST_ENTRY'
+  | 'USD_CONTEST_REFUND'
   | 'USD_PAYOUT_CREDIT'
   | 'USD_PRIZE_POOL_LOCK'
   | 'RTC_PURCHASE'
@@ -44,6 +45,7 @@ const ledgerEntrySchema = new Schema({
       'USD_DEPOSIT',
       'USD_WITHDRAWAL',
       'USD_CONTEST_ENTRY',
+      'USD_CONTEST_REFUND',
       'USD_PAYOUT_CREDIT',
       'USD_PRIZE_POOL_LOCK',
       'RTC_PURCHASE',
@@ -109,4 +111,3 @@ export type ILedgerEntry = InferSchemaType<typeof ledgerEntrySchema>;
 export type LedgerEntryDocument = HydratedDocument<ILedgerEntry>;
 
 export default model<LedgerEntryDocument>('LedgerEntry', ledgerEntrySchema);
-

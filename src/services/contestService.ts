@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import Contest, { ContestDocument } from '../models/Contest';
+import LedgerEntry from '../models/LedgerEntry';
 import Table from '../models/Table';
+import Transaction from '../models/Transaction';
 import TournamentTicket, { TournamentTicketDocument } from '../models/TournamentTicket';
 import { FinancialService } from './financialService';
 import { logLedgerEntry } from './ledgerService';
@@ -24,6 +26,12 @@ type ContestPayoutInput = Array<{ rank: number; amount?: number; percentage?: nu
 
 export const ADMIN_MUTABLE_CONTEST_STATUSES = ['draft', 'open', 'locked', 'cancelled'] as const;
 export type AdminMutableContestStatus = typeof ADMIN_MUTABLE_CONTEST_STATUSES[number];
+
+interface RefundContestEntriesOptions {
+  refundedBy?: string;
+  reason?: string;
+  deleteAfterRefund?: boolean;
+}
 
 const roundCurrency = (value: number): number => {
   return Math.round(value * 100) / 100;
@@ -348,6 +356,164 @@ export class ContestService {
 
     return {
       contestId: contest.contestId,
+    };
+  }
+
+  static async refundContestEntries(contestId: string, options: RefundContestEntriesOptions = {}) {
+    const contest = await findContest(contestId);
+    if (!contest) {
+      throw new Error('Contest not found.');
+    }
+    if (contest.status === 'completed') {
+      throw new Error('Completed contests cannot be refunded automatically.');
+    }
+
+    const [entryLogs, refundLogs, redeemedTickets] = await Promise.all([
+      LedgerEntry.find({
+        eventType: 'USD_CONTEST_ENTRY',
+        referenceType: 'contest',
+        referenceId: contest.contestId,
+        status: 'completed',
+      }).sort({ occurredAt: 1, createdAt: 1 }),
+      LedgerEntry.find({
+        eventType: 'USD_CONTEST_REFUND',
+        referenceType: 'contest',
+        referenceId: contest.contestId,
+        status: 'completed',
+      }),
+      TournamentTicket.find({
+        used: true,
+        'metadata.redeemedContestId': contest.contestId,
+      }),
+    ]);
+
+    const paidEntriesByUser = new Map<string, any>();
+    for (const entry of entryLogs) {
+      const userId = entry.userId?.toString();
+      if (userId && !paidEntriesByUser.has(userId)) {
+        paidEntriesByUser.set(userId, entry);
+      }
+    }
+
+    const refundedUserIds = new Set(
+      refundLogs
+        .map((entry) => entry.userId?.toString())
+        .filter((value): value is string => !!value)
+    );
+
+    const refundableEntries = [...paidEntriesByUser.entries()].filter(
+      ([userId]) => !refundedUserIds.has(userId)
+    );
+
+    const refundedUsers: Array<{ userId: string; amount: number }> = [];
+    let refundedAmount = 0;
+
+    for (const [userId, entry] of refundableEntries) {
+      const amount = roundCurrency(
+        typeof entry.amount === 'number' && entry.amount > 0 ? entry.amount : contest.entryFee
+      );
+
+      await FinancialService.refundContestEntry(userId, amount, contest.contestId, {
+        adminUserId: options.refundedBy,
+        reason: options.reason || 'Admin tournament cancellation',
+        originalLedgerEntryId: entry._id.toString(),
+      });
+
+      const transaction = new Transaction({
+        userId: new mongoose.Types.ObjectId(userId),
+        type: 'Deposit',
+        amount,
+        currency: 'USD',
+        status: 'Completed',
+        details: {
+          contestId: contest.contestId,
+          refundType: 'ADMIN_CONTEST_REFUND',
+          adminUserId: options.refundedBy,
+          reason: options.reason || 'Admin tournament cancellation',
+          originalLedgerEntryId: entry._id.toString(),
+        },
+      });
+      await transaction.save();
+
+      refundedUsers.push({ userId, amount });
+      refundedAmount = roundCurrency(refundedAmount + amount);
+    }
+
+    const restoredTickets: Array<{ ticketId: string; userId: string }> = [];
+    for (const ticket of redeemedTickets) {
+      const previousUsedAt = ticket.usedAt ?? null;
+      const nextMetadata: Record<string, unknown> = {
+        ...(ticket.metadata || {}),
+        previouslyRedeemedContestId:
+          (ticket.metadata as Record<string, unknown> | undefined)?.redeemedContestId ?? contest.contestId,
+        previouslyRedeemedAt:
+          (ticket.metadata as Record<string, unknown> | undefined)?.redeemedAt ?? previousUsedAt,
+        restoredFromCancelledContestId: contest.contestId,
+        restoredAt: new Date(),
+        restoredByAdminUserId: options.refundedBy ?? null,
+      };
+      delete nextMetadata.redeemedContestId;
+      delete nextMetadata.redeemedAt;
+
+      ticket.used = false;
+      ticket.usedAt = undefined;
+      ticket.metadata = nextMetadata;
+      await ticket.save();
+
+      await logLedgerEntry({
+        userId: ticket.userId,
+        currency: 'RTC',
+        mode: GameMode.USD_CONTEST,
+        eventType: 'RTC_TICKET_ISSUED',
+        direction: 'info',
+        amount: 0,
+        referenceType: 'contest',
+        referenceId: contest.contestId,
+        metadata: {
+          ticketId: ticket._id.toString(),
+          action: 'restore_after_cancel',
+          adminUserId: options.refundedBy,
+        },
+      });
+
+      restoredTickets.push({
+        ticketId: ticket._id.toString(),
+        userId: ticket.userId.toString(),
+      });
+    }
+
+    await Table.updateMany(
+      { activeContestId: contest.contestId },
+      { $unset: { activeContestId: 1 } }
+    );
+
+    const endedAt = new Date();
+    let deleted = false;
+    let persistedContest: ContestDocument | null = contest;
+
+    if (options.deleteAfterRefund) {
+      await contest.deleteOne();
+      deleted = true;
+      persistedContest = null;
+    } else {
+      contest.participants = [];
+      contest.status = 'cancelled';
+      contest.endedAt = endedAt;
+      await contest.save();
+      persistedContest = contest;
+    }
+
+    return {
+      contestId: contest.contestId,
+      deleted,
+      refundedAmount,
+      paidEntryCount: paidEntriesByUser.size,
+      refundedEntryCount: refundedUsers.length,
+      restoredTicketCount: restoredTickets.length,
+      alreadyRefundedCount: refundedUserIds.size,
+      contest: persistedContest,
+      refundedUsers,
+      restoredTickets,
     };
   }
 

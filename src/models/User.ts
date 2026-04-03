@@ -35,6 +35,18 @@ const userSchema = new Schema({
     type: String,
     default: '/avatars/default.svg',
   },
+  avatarImageData: {
+    type: Buffer,
+    default: null,
+  },
+  avatarImageContentType: {
+    type: String,
+    default: null,
+  },
+  avatarImageUpdatedAt: {
+    type: Date,
+    default: null,
+  },
   vipStatus: {
     type: String,
     enum: ['NONE', 'PENDING', 'ACTIVE', 'PAUSED', 'CANCELED', 'DEACTIVATED', 'COMPLETED'],

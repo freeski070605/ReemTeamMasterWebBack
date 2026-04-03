@@ -1,32 +1,16 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import fs from 'fs';
-import path from 'path';
 import User from '../models/User';
 import RecentPlayer from '../models/RecentPlayer';
 import authMiddleware from '../middleware/auth';
 
 const router = Router();
-const AVATAR_DIRECTORY = path.resolve(__dirname, '../../public/avatars');
-
-fs.mkdirSync(AVATAR_DIRECTORY, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: function (_req, _file, cb) {
-    cb(null, AVATAR_DIRECTORY);
-  },
-  filename: function (req: Request, file, cb) {
-    const userId = req.user?.id || 'unknown-user';
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const extFromName = path.extname(file.originalname || '').toLowerCase();
-    const extFromMime = file.mimetype.split('/')[1];
-    const extension = extFromName || (extFromMime ? `.${extFromMime}` : '.png');
-    cb(null, `${userId}-${uniqueSuffix}${extension}`);
-  }
-});
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 2 * 1024 * 1024,
+  },
   fileFilter: (_req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
@@ -52,7 +36,11 @@ const uploadAvatarHandler = async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    user.avatarUrl = `/avatars/${req.file.filename}`;
+    const updatedAt = new Date();
+    user.avatarImageData = req.file.buffer;
+    user.avatarImageContentType = req.file.mimetype || 'image/png';
+    user.avatarImageUpdatedAt = updatedAt;
+    user.avatarUrl = `/api/users/avatar/${user._id.toString()}?v=${updatedAt.getTime()}`;
     await user.save();
 
     res.json({ message: 'Avatar uploaded successfully.', avatarUrl: user.avatarUrl });
@@ -88,6 +76,9 @@ const selectDefaultAvatarHandler = async (req: Request, res: Response) => {
     }
 
     user.avatarUrl = resolvedAvatarUrl;
+    user.avatarImageData = null;
+    user.avatarImageContentType = null;
+    user.avatarImageUpdatedAt = null;
     await user.save();
 
     res.json({ message: 'Avatar updated successfully.', avatarUrl: user.avatarUrl });
@@ -101,6 +92,35 @@ router.post('/avatar/upload', authMiddleware, upload.single('avatar'), uploadAva
 router.post('/avatar', authMiddleware, upload.single('avatar'), uploadAvatarHandler);
 router.post('/avatar/select-default', authMiddleware, selectDefaultAvatarHandler);
 router.post('/avatar/default', authMiddleware, selectDefaultAvatarHandler);
+router.get('/avatar/:userId', async (req: Request, res: Response) => {
+  try {
+    const userId = typeof req.params.userId === 'string' ? req.params.userId.trim() : '';
+    if (!userId) {
+      return res.redirect(302, '/avatars/default.svg');
+    }
+
+    const user = await User.findById(userId)
+      .select('avatarImageData avatarImageContentType avatarImageUpdatedAt')
+      .lean();
+
+    if (!user?.avatarImageData || !user?.avatarImageContentType) {
+      return res.redirect(302, '/avatars/default.svg');
+    }
+
+    if (user.avatarImageUpdatedAt) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      res.setHeader('Last-Modified', new Date(user.avatarImageUpdatedAt).toUTCString());
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=300');
+    }
+
+    res.setHeader('Content-Type', user.avatarImageContentType);
+    return res.status(200).send(user.avatarImageData);
+  } catch (error) {
+    console.error('Failed to serve avatar image', error);
+    return res.redirect(302, '/avatars/default.svg');
+  }
+});
 
 router.get('/recent-players', authMiddleware, async (req: Request, res: Response) => {
   try {

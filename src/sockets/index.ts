@@ -116,14 +116,14 @@ const resolveTurnExpiresAt = (gameState: IGameState): number => {
 
 const resolveBalanceForMode = (wallet: any | null, mode?: GameMode): number => {
   if (!wallet) return 0;
-  if (mode === GameMode.USD_CONTEST) {
+  if (mode === GameMode.USD_CONTEST || mode === GameMode.PRIVATE_USD_TABLE) {
     return wallet.usdBalance ?? wallet.availableBalance ?? 0;
   }
   return wallet.rtcBalance ?? 0;
 };
 
 const isContinuousMode = (mode?: GameMode): boolean => {
-  return mode === GameMode.FREE_RTC_TABLE || mode === undefined;
+  return mode === GameMode.FREE_RTC_TABLE || mode === GameMode.PRIVATE_USD_TABLE || mode === undefined;
 };
 
 const isCribTableMode = (mode?: GameMode): boolean => {
@@ -132,6 +132,48 @@ const isCribTableMode = (mode?: GameMode): boolean => {
 
 const isCompetitionMode = (mode?: GameMode): boolean => {
   return mode === GameMode.RTC_TOURNAMENT || mode === GameMode.RTC_SATELLITE || mode === GameMode.USD_CONTEST;
+};
+
+const isInviteUsable = (invite: { expiresAt?: Date | null; maxUses?: number; uses?: number } | null) => {
+  if (!invite) {
+    return false;
+  }
+
+  const expired = invite.expiresAt && invite.expiresAt.getTime() <= Date.now();
+  const maxed = typeof invite.maxUses === "number" && invite.maxUses > 0 && (invite.uses ?? 0) >= invite.maxUses;
+  return !expired && !maxed;
+};
+
+const validateInviteForTable = async (tableId: string, inviteCode?: string) => {
+  const normalizedCode = typeof inviteCode === "string" ? inviteCode.trim() : "";
+  if (!normalizedCode) {
+    return null;
+  }
+
+  const invite = await Invite.findOne({ code: normalizedCode, tableId });
+  if (!isInviteUsable(invite)) {
+    throw new Error("Invite code is invalid or expired.");
+  }
+
+  return invite;
+};
+
+const consumeInviteForJoin = async (invite: any, userId: string) => {
+  if (!invite) {
+    return;
+  }
+
+  const alreadyUsed = invite.usedBy?.some((id: any) => id.toString() === userId);
+  const update: any = {
+    $set: { lastUsedAt: new Date() },
+  };
+
+  if (!alreadyUsed) {
+    update.$inc = { uses: 1 };
+    update.$addToSet = { usedBy: new mongoose.Types.ObjectId(userId) };
+  }
+
+  await Invite.updateOne({ _id: invite._id }, update);
 };
 
 const findContestByAnyId = async (contestId: string): Promise<ContestDocument | null> => {
@@ -1288,30 +1330,7 @@ const setupSocketHandlers = (io: Server) => {
 
       // Check if player is already in the table
       const existingPlayer = table.players.find(p => p.userId.toString() === userId);
-
-      if (table.isPrivate && !existingPlayer) {
-        const isOwner = table.createdBy?.toString() === userId;
-        if (!isOwner) {
-          const normalizedCode = typeof inviteCode === "string" ? inviteCode.trim() : "";
-          if (!normalizedCode) {
-            return socket.emit("gameError", { message: "Invite code required to join this private table." });
-          }
-          const invite = await Invite.findOne({ code: normalizedCode, tableId: table._id });
-          const expired = invite?.expiresAt && invite.expiresAt.getTime() <= Date.now();
-          const maxed = invite && invite.maxUses > 0 && invite.uses >= invite.maxUses;
-          if (!invite || expired || maxed) {
-            return socket.emit("gameError", { message: "Invite code is invalid or expired." });
-          }
-          await Invite.updateOne(
-            { _id: invite._id },
-            {
-              $set: { lastUsedAt: new Date() },
-              $inc: { uses: 1 },
-              $addToSet: { usedBy: new mongoose.Types.ObjectId(userId) },
-            }
-          );
-        }
-      }
+      const isOwner = table.createdBy?.toString() === userId;
 
       if (existingPlayer) {
         console.log(`User ${username} (${userId}) is already in table ${tableId}. Rejoining.`);
@@ -1335,6 +1354,19 @@ const setupSocketHandlers = (io: Server) => {
         } else {
           return socket.emit("gameError", { message: "No active game state found for this table." });
         }
+      }
+
+      let validatedInvite: any | null = null;
+      try {
+        validatedInvite = await validateInviteForTable(table._id.toString(), inviteCode);
+      } catch (error: any) {
+        return socket.emit("gameError", {
+          message: error?.message || "Invite code is invalid or expired.",
+        });
+      }
+
+      if (table.isPrivate && !isOwner && !validatedInvite) {
+        return socket.emit("gameError", { message: "Invite code required to join this private table." });
       }
 
       const existingGameState = await loadGameState(tableId);
@@ -1375,7 +1407,9 @@ const setupSocketHandlers = (io: Server) => {
         const availableForMode = resolveBalanceForMode(wallet, tableMode);
         if (availableForMode < requiredEntryBuffer) {
           return socket.emit("gameError", {
-            message: "Insufficient RTC balance to join this table.",
+            message: tableMode === GameMode.PRIVATE_USD_TABLE
+              ? "Insufficient USD balance to join this table."
+              : "Insufficient RTC balance to join this table.",
           });
         }
       }
@@ -1430,8 +1464,8 @@ const setupSocketHandlers = (io: Server) => {
       });
       void emitLobbyPresence(io);
       
-      // Check if we need to add an AI to start the game immediately (1 User vs 1 AI)
-      if (table.currentPlayerCount === 1 && isCribTableMode(tableMode)) {
+      // Public RTC cribs can auto-fill with a single AI opponent. Private tables stay human-only.
+      if (!table.isPrivate && table.currentPlayerCount === 1 && isCribTableMode(tableMode)) {
           console.log(`Only 1 player in table ${tableId}, adding an AI opponent.`);
           const aiUserId = new mongoose.Types.ObjectId().toString();
           const aiUsername = `Bot_${Math.random().toString(36).substring(2, 6)}`;
@@ -1472,6 +1506,11 @@ const setupSocketHandlers = (io: Server) => {
         if (tableMode === GameMode.USD_CONTEST && playersInTable.some((player) => player.isAI)) {
           return socket.emit("gameError", {
             message: "Cash Crown sessions cannot include AI players.",
+          });
+        }
+        if (tableMode === GameMode.PRIVATE_USD_TABLE && playersInTable.some((player) => player.isAI)) {
+          return socket.emit("gameError", {
+            message: "Private cash tables cannot include AI players.",
           });
         }
 
@@ -1532,6 +1571,7 @@ const setupSocketHandlers = (io: Server) => {
 
         table.currentMatchId = new mongoose.Types.ObjectId(); // Create a new Match ID for the table
         await table.save();
+        await consumeInviteForJoin(validatedInvite, userId);
         await saveGameState(gameState);
         await emitWalletBalanceUpdates(io, tableId, gameState);
         if (gameState.status === "round-end") {
@@ -1544,7 +1584,11 @@ const setupSocketHandlers = (io: Server) => {
         const startMessage = gameState.status === "round-end"
           ? "Round ended on deal."
           : isContinuousMode(tableMode)
-            ? `${username} joined, game starting with AI.`
+            ? table.isPrivate
+              ? `${username} joined. Your private table is starting now.`
+              : playersInTable.some((player) => player.isAI)
+                ? `${username} joined, game starting with AI.`
+                : `${username} joined, game starting now.`
             : `${username} joined, competition session starting.`;
         io.to(tableId).emit("tableUpdate", { message: startMessage, table, gameState });
         io.to(socket.id).emit("initialGameState", gameState);
@@ -1557,6 +1601,7 @@ const setupSocketHandlers = (io: Server) => {
       }
 
       await table.save();
+      await consumeInviteForJoin(validatedInvite, userId);
 
       console.log(`User ${username} (${userId}) joined table ${tableId}. Current players: ${table.currentPlayerCount}`);
 

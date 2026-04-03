@@ -4,8 +4,8 @@ import mongoose from 'mongoose';
 import Invite from '../models/Invite';
 import Table from '../models/Table';
 import authMiddleware from '../middleware/auth';
-import { verifyToken } from '../utils/jwt';
 import { sendInviteEmail } from '../utils/email';
+import User from '../models/User';
 
 const router = Router();
 
@@ -58,12 +58,31 @@ const isInviteUsable = (invite: any) => {
   return !expired && !maxed;
 };
 
-const readBearerToken = (req: Request): string | null => {
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Bearer ')) {
+const buildInviteTableSummary = async (tableId?: mongoose.Types.ObjectId | string | null) => {
+  if (!tableId) {
     return null;
   }
-  return header.slice('Bearer '.length).trim();
+
+  const table = await Table.findById(tableId)
+    .select('name mode stake currentPlayerCount maxPlayers isPrivate status createdBy hostNote');
+  if (!table) {
+    return null;
+  }
+
+  const host = table.createdBy ? await User.findById(table.createdBy).select('username') : null;
+
+  return {
+    tableId: table._id.toString(),
+    name: table.name,
+    mode: table.mode,
+    stake: table.stake,
+    currentPlayerCount: table.currentPlayerCount,
+    maxPlayers: table.maxPlayers,
+    isPrivate: table.isPrivate,
+    status: table.status,
+    hostName: host?.username ?? 'VIP Host',
+    hostNote: table.hostNote ?? null,
+  };
 };
 
 router.post('/', authMiddleware, async (req: Request, res: Response) => {
@@ -123,13 +142,19 @@ router.get('/:code', async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'Invite not found or expired.' });
     }
 
+    const table = await buildInviteTableSummary(invite.tableId);
+    if (invite.tableId && !table) {
+      return res.status(404).json({ message: 'The table for this invite is no longer available.' });
+    }
+
     return res.status(200).json({
       code: invite.code,
       purpose: invite.purpose,
-      tableId: invite.tableId,
+      tableId: invite.tableId?.toString?.() ?? null,
       expiresAt: invite.expiresAt,
       maxUses: invite.maxUses,
       uses: invite.uses,
+      table,
     });
   } catch (error) {
     console.error('[invite] Failed to resolve invite', error);
@@ -144,29 +169,15 @@ router.post('/:code/accept', async (req: Request, res: Response) => {
     if (!invite || !isInviteUsable(invite)) {
       return res.status(404).json({ message: 'Invite not found or expired.' });
     }
-
-    const token = readBearerToken(req);
-    const payload = token ? verifyToken(token) : null;
-    const userId = payload?.id;
-
-    const update: any = {
-      $set: { lastUsedAt: new Date() },
-    };
-
-    if (userId && invite.usedBy?.some((id: any) => id.toString() === userId)) {
-      // don't increment uses for repeat accepts by the same user
-    } else {
-      update.$inc = { uses: 1 };
-      if (userId) {
-        update.$addToSet = { usedBy: new mongoose.Types.ObjectId(userId) };
-      }
+    const table = await buildInviteTableSummary(invite.tableId);
+    if (invite.tableId && !table) {
+      return res.status(404).json({ message: 'The table for this invite is no longer available.' });
     }
 
-    await Invite.updateOne({ _id: invite._id }, update);
-
     return res.status(200).json({
-      tableId: invite.tableId,
+      tableId: invite.tableId?.toString?.() ?? null,
       purpose: invite.purpose,
+      table,
     });
   } catch (error) {
     console.error('[invite] Failed to accept invite', error);

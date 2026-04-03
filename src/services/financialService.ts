@@ -180,6 +180,101 @@ export class FinancialService {
     return wallet;
   }
 
+  static async privateTableEntry(
+    userId: string,
+    stake: number,
+    tableId: string,
+    metadata: Record<string, unknown> = {}
+  ): Promise<WalletDocument> {
+    assertPositiveAmount(stake, 'stake');
+
+    const wallet = await getWalletByUserId(userId);
+    if (wallet.usdBalance < stake) {
+      throw new Error('Insufficient USD balance to join this private table.');
+    }
+
+    wallet.usdBalance -= stake;
+    wallet.availableBalance -= stake;
+    await wallet.save();
+
+    await logLedgerEntry({
+      userId,
+      currency: 'USD',
+      mode: GameMode.PRIVATE_USD_TABLE,
+      eventType: 'USD_PRIVATE_TABLE_ENTRY',
+      direction: 'debit',
+      amount: stake,
+      balanceAfter: wallet.usdBalance,
+      referenceType: 'table',
+      referenceId: tableId,
+      metadata,
+    });
+
+    return wallet;
+  }
+
+  static async privateTablePenalty(
+    userId: string,
+    amount: number,
+    tableId: string,
+    metadata: Record<string, unknown> = {}
+  ): Promise<WalletDocument> {
+    assertPositiveAmount(amount);
+
+    const wallet = await getWalletByUserId(userId);
+    if (wallet.usdBalance < amount) {
+      throw new Error('Insufficient USD balance for private table penalty.');
+    }
+
+    wallet.usdBalance -= amount;
+    wallet.availableBalance -= amount;
+    await wallet.save();
+
+    await logLedgerEntry({
+      userId,
+      currency: 'USD',
+      mode: GameMode.PRIVATE_USD_TABLE,
+      eventType: 'USD_PRIVATE_TABLE_PENALTY',
+      direction: 'debit',
+      amount,
+      balanceAfter: wallet.usdBalance,
+      referenceType: 'table',
+      referenceId: tableId,
+      metadata,
+    });
+
+    return wallet;
+  }
+
+  static async privateTablePayout(
+    userId: string,
+    amount: number,
+    tableId: string,
+    metadata: Record<string, unknown> = {}
+  ): Promise<WalletDocument> {
+    assertPositiveAmount(amount);
+
+    const wallet = await getWalletByUserId(userId);
+    wallet.usdBalance += amount;
+    wallet.availableBalance += amount;
+    await wallet.save();
+
+    await logLedgerEntry({
+      userId,
+      currency: 'USD',
+      mode: GameMode.PRIVATE_USD_TABLE,
+      eventType: 'USD_PRIVATE_TABLE_PAYOUT',
+      direction: 'credit',
+      amount,
+      balanceAfter: wallet.usdBalance,
+      referenceType: 'table',
+      referenceId: tableId,
+      metadata,
+    });
+
+    return wallet;
+  }
+
   static async logPrizePoolLock(params: {
     contestId: string;
     prizePool: number;

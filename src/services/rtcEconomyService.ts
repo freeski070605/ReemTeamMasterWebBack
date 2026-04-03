@@ -39,8 +39,8 @@ const getRtcBundle = (bundleId: string): RtcPurchaseBundle => {
 };
 
 const assertRtcMode = (mode: GameMode) => {
-  if (mode === GameMode.USD_CONTEST) {
-    throw new Error('RTC economy operations are not allowed in USD_CONTEST mode.');
+  if (mode === GameMode.USD_CONTEST || mode === GameMode.PRIVATE_USD_TABLE) {
+    throw new Error('RTC economy operations are not allowed in USD table modes.');
   }
 };
 

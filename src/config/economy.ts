@@ -55,7 +55,7 @@ export const scaleStakeTierToRtc = (stakeTier: number): number => {
 };
 
 export const resolveStakeAmountForMode = (stake: number, mode?: GameMode): number => {
-  if (mode === GameMode.USD_CONTEST) {
+  if (mode === GameMode.USD_CONTEST || mode === GameMode.PRIVATE_USD_TABLE) {
     return stake;
   }
   return scaleStakeTierToRtc(stake);

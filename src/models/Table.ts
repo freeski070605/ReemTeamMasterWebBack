@@ -46,6 +46,11 @@ const tableSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: 'User',
   },
+  hostNote: {
+    type: String,
+    trim: true,
+    maxlength: 160,
+  },
   minPlayers: {
     type: Number,
     required: true,
@@ -91,6 +96,7 @@ export interface ITable {
   isPrivate: boolean;
   isPromo: boolean;
   createdBy?: Types.ObjectId;
+  hostNote?: string;
   minPlayers: number;
   maxPlayers: number;
   currentPlayerCount: number;

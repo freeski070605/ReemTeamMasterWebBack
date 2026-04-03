@@ -11,6 +11,9 @@ export type LedgerEventType =
   | 'USD_CONTEST_REFUND'
   | 'USD_PAYOUT_CREDIT'
   | 'USD_PRIZE_POOL_LOCK'
+  | 'USD_PRIVATE_TABLE_ENTRY'
+  | 'USD_PRIVATE_TABLE_PENALTY'
+  | 'USD_PRIVATE_TABLE_PAYOUT'
   | 'RTC_PURCHASE'
   | 'RTC_REFILL'
   | 'RTC_ANTE'
@@ -48,6 +51,9 @@ const ledgerEntrySchema = new Schema({
       'USD_CONTEST_REFUND',
       'USD_PAYOUT_CREDIT',
       'USD_PRIZE_POOL_LOCK',
+      'USD_PRIVATE_TABLE_ENTRY',
+      'USD_PRIVATE_TABLE_PENALTY',
+      'USD_PRIVATE_TABLE_PAYOUT',
       'RTC_PURCHASE',
       'RTC_REFILL',
       'RTC_ANTE',

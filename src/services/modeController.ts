@@ -13,6 +13,7 @@ import TournamentTicket from '../models/TournamentTicket';
 import { logLedgerEntry } from './ledgerService';
 import { RtcEconomyService } from './rtcEconomyService';
 import { ContestService } from './contestService';
+import { FinancialService } from './financialService';
 import User from '../models/User';
 import { resolveUserRole, roleAtLeast } from '../constants/roles';
 
@@ -295,6 +296,35 @@ const settleUsdContestRound = async (
   };
 };
 
+const settlePrivateUsdRound = async (
+  gameState: IGameState,
+  settlementData: RoundSettlementData
+) => {
+  const roundReference = getRoundReference(gameState);
+
+  for (const penalty of settlementData.penalties) {
+    const penalizedPlayer = gameState.players.find((player) => player.userId === penalty.playerId);
+    if (!penalizedPlayer || penalizedPlayer.isAI) {
+      continue;
+    }
+
+    await FinancialService.privateTablePenalty(penalizedPlayer.userId, penalty.amount, gameState.tableId, {
+      referenceType: 'private_usd_penalty',
+      referenceId: roundReference,
+      roundEndedBy: gameState.roundEndedBy,
+    });
+  }
+
+  const winningPlayer = gameState.players.find((player) => player.userId === gameState.roundWinnerId);
+  if (winningPlayer && !winningPlayer.isAI && settlementData.winnerPayout > 0) {
+    await FinancialService.privateTablePayout(winningPlayer.userId, settlementData.winnerPayout, gameState.tableId, {
+      referenceType: 'private_usd_round_result',
+      referenceId: roundReference,
+      roundEndedBy: gameState.roundEndedBy,
+    });
+  }
+};
+
 export class ModeController {
   static async applyRoundEntryEconomy(gameState: IGameState, adminUserId?: string): Promise<IGameState> {
     if (gameState.roundEntryApplied) {
@@ -361,6 +391,20 @@ export class ModeController {
               referenceId: roundReference,
             }
           );
+        }
+        break;
+      case GameMode.PRIVATE_USD_TABLE:
+        if (humanPlayers.length < 2) {
+          throw new Error('At least two human players are required to start this private cash table.');
+        }
+        if (hasAI) {
+          throw new Error('Private cash tables do not allow AI players.');
+        }
+        for (const player of humanPlayers) {
+          await FinancialService.privateTableEntry(player.userId, gameState.baseStake, gameState.tableId, {
+            referenceType: 'private_usd_round_entry',
+            referenceId: roundReference,
+          });
         }
         break;
       case GameMode.RTC_TOURNAMENT:
@@ -446,6 +490,9 @@ export class ModeController {
       switch (mode) {
         case GameMode.FREE_RTC_TABLE:
           await settleFreeRtcRound(settlementState, settlementData);
+          break;
+        case GameMode.PRIVATE_USD_TABLE:
+          await settlePrivateUsdRound(settlementState, settlementData);
           break;
         case GameMode.RTC_TOURNAMENT:
           await settleRtcTournamentRound(settlementState, settlementData, GameMode.RTC_TOURNAMENT);

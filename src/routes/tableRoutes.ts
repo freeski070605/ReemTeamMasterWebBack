@@ -6,6 +6,10 @@ import authMiddleware from '../middleware/auth';
 import User from '../models/User';
 import { resolveUserRole, roleAtLeast } from '../constants/roles';
 import { isVipActive } from '../utils/vip';
+import { GameMode } from '../domain/gameMode';
+
+const PRIVATE_RTC_STAKE_OPTIONS = [1, 5, 10, 25, 50];
+const PRIVATE_USD_STAKE_OPTIONS = [5, 10, 20, 50, 100];
 
 const resolveFrontendBaseUrl = (req: express.Request) => {
   const explicit = (process.env.FRONTEND_URL || '').trim();
@@ -100,21 +104,39 @@ router.post('/private', authMiddleware, async (req, res) => {
       return res.status(403).json({ message: 'VIP subscription required to create private tables.' });
     }
 
+    const requestedMode = req.body?.mode;
+    const mode = requestedMode === GameMode.PRIVATE_USD_TABLE
+      ? GameMode.PRIVATE_USD_TABLE
+      : GameMode.FREE_RTC_TABLE;
     const stake = Number(req.body?.stake);
     const maxPlayers = Number(req.body?.maxPlayers);
+    const hostNote = typeof req.body?.hostNote === 'string' ? req.body.hostNote.trim().slice(0, 160) : '';
 
     if (!Number.isFinite(stake) || stake <= 0) {
       return res.status(400).json({ message: 'Invalid stake.' });
     }
 
+    const allowedStakes = mode === GameMode.PRIVATE_USD_TABLE
+      ? PRIVATE_USD_STAKE_OPTIONS
+      : PRIVATE_RTC_STAKE_OPTIONS;
+    if (!allowedStakes.includes(stake)) {
+      return res.status(400).json({
+        message: mode === GameMode.PRIVATE_USD_TABLE
+          ? 'Choose one of the supported USD stakes: $5, $10, $20, $50, or $100.'
+          : 'Choose one of the supported RTC stakes: 1, 5, 10, 25, or 50.',
+      });
+    }
+
     const resolvedMaxPlayers = Number.isFinite(maxPlayers) ? Math.min(Math.max(maxPlayers, 2), 4) : 4;
     const suffix = randomBytes(2).toString('hex').toUpperCase();
-    const tableName = `Private Table ${suffix}`;
+    const tableName = mode === GameMode.PRIVATE_USD_TABLE
+      ? `Private Cash Table ${suffix}`
+      : `Private RTC Table ${suffix}`;
 
     const table = new Table({
       name: tableName,
       stake,
-      mode: 'FREE_RTC_TABLE',
+      mode,
       minPlayers: 2,
       maxPlayers: resolvedMaxPlayers,
       currentPlayerCount: 0,
@@ -123,6 +145,7 @@ router.post('/private', authMiddleware, async (req, res) => {
       isPrivate: true,
       isPromo: false,
       createdBy: (req.user as any)?.id,
+      hostNote: hostNote || undefined,
     });
     await table.save();
 

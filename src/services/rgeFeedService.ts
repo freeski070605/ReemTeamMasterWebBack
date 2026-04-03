@@ -139,14 +139,14 @@ const scoreSignal = (input: {
 
 const detectPlatforms = (signalType: string) => {
   if (signalType.includes('leaderboard') || signalType.includes('deposit')) {
-    return ['instagram', 'x', 'story'];
+    return ['instagram', 'story'];
   }
 
   if (signalType.includes('reem') || signalType.includes('streak')) {
-    return ['instagram', 'x', 'reels'];
+    return ['instagram', 'story'];
   }
 
-  return ['instagram', 'x'];
+  return ['instagram'];
 };
 
 export const buildRgeFeed = async (days = 30) => {

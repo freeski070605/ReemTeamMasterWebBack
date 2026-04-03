@@ -7,12 +7,17 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { FinancialService } from '../services/financialService';
 import { ensureWalletForUser } from '../services/walletProvisioningService';
+import Match from '../models/Match';
+import Table from '../models/Table';
+import { GameMode } from '../domain/gameMode';
 
 dotenv.config();
 
 const router = Router();
 
 const MIN_WITHDRAWAL_AMOUNT = parseFloat(process.env.MIN_WITHDRAWAL_AMOUNT || '5');
+const USD_GAME_MODES = new Set<GameMode>([GameMode.PRIVATE_USD_TABLE, GameMode.USD_CONTEST]);
+const roundAmount = (value: number) => Number(value.toFixed(2));
 
 // Request a withdrawal
 router.post('/request-withdrawal', authMiddleware, async (req: Request, res: Response) => {
@@ -134,6 +139,90 @@ router.get('/balances', authMiddleware, async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error fetching wallet balances:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+router.get('/account-stats', authMiddleware, async (req: Request, res: Response) => {
+  const userId = (req.user as ITokenPayload)?.id;
+
+  if (!userId) {
+    return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
+  }
+
+  try {
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+    const matches = await Match.find({
+      status: 'completed',
+      'players.userId': userObjectId,
+    })
+      .select('tableId players winner winType')
+      .lean();
+
+    const uniqueTableIds = [
+      ...new Set(matches.map((match) => String(match.tableId ?? '')).filter(Boolean)),
+    ].map((tableId) => new mongoose.Types.ObjectId(tableId));
+    const tables = uniqueTableIds.length
+      ? await Table.find({ _id: { $in: uniqueTableIds } }).select('mode').lean()
+      : [];
+    const tableModeById = new Map(tables.map((table) => [String(table._id), table.mode]));
+
+    const summary = {
+      matchesPlayed: 0,
+      totalWins: 0,
+      totalReems: 0,
+      winRate: 0,
+      usdEarned: 0,
+      rtcEarned: 0,
+      usdNet: 0,
+      rtcNet: 0,
+      biggestUsdPayout: 0,
+      biggestRtcPayout: 0,
+    };
+
+    for (const match of matches) {
+      const player = match.players?.find((entry) => String(entry.userId) === userId);
+      if (!player) {
+        continue;
+      }
+
+      const payout = Number(player.payout ?? 0);
+      const earned = Math.max(0, payout);
+      const isUsdMode = USD_GAME_MODES.has(
+        (tableModeById.get(String(match.tableId ?? '')) as GameMode | undefined) ?? GameMode.FREE_RTC_TABLE
+      );
+
+      summary.matchesPlayed += 1;
+
+      if (String(match.winner ?? '') === userId) {
+        summary.totalWins += 1;
+        if (match.winType === 'REEM') {
+          summary.totalReems += 1;
+        }
+      }
+
+      if (isUsdMode) {
+        summary.usdEarned += earned;
+        summary.usdNet += payout;
+        summary.biggestUsdPayout = Math.max(summary.biggestUsdPayout, earned);
+      } else {
+        summary.rtcEarned += earned;
+        summary.rtcNet += payout;
+        summary.biggestRtcPayout = Math.max(summary.biggestRtcPayout, earned);
+      }
+    }
+
+    summary.winRate = summary.matchesPlayed > 0 ? roundAmount((summary.totalWins / summary.matchesPlayed) * 100) : 0;
+    summary.usdEarned = roundAmount(summary.usdEarned);
+    summary.rtcEarned = roundAmount(summary.rtcEarned);
+    summary.usdNet = roundAmount(summary.usdNet);
+    summary.rtcNet = roundAmount(summary.rtcNet);
+    summary.biggestUsdPayout = roundAmount(summary.biggestUsdPayout);
+    summary.biggestRtcPayout = roundAmount(summary.biggestRtcPayout);
+
+    res.status(200).json(summary);
+  } catch (error) {
+    console.error('Error fetching account stats:', error);
+    res.status(500).json({ message: 'Internal server error.' });
   }
 });
 

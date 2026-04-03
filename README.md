@@ -19,6 +19,7 @@ Environment variables (set in Render):
 - `REDIS_URL`
 - `JWT_SECRET`
 - `FRONTEND_URL`
+- `FRONTEND_URLS` (recommended for multiple allowed web origins, for example `https://reemteamapp.com,https://www.reemteamapp.com`)
 - `BACKEND_URL`
 - `SQUARE_ACCESS_TOKEN`
 - `SQUARE_ENVIRONMENT` (`sandbox` or `production`)
@@ -32,6 +33,11 @@ Environment variables (set in Render):
 - `SQUARE_RTC_BUNDLE_9_99_CATALOG_OBJECT_ID` (optional)
 - `SQUARE_RTC_BUNDLE_19_99_CATALOG_OBJECT_ID` (optional)
 - `MIN_WITHDRAWAL_AMOUNT`
+
+If `FRONTEND_URL` / `FRONTEND_URLS` are omitted, the backend now falls back to allowing:
+- `https://reemteamapp.com`
+- `https://www.reemteamapp.com`
+- `http://localhost:3000`
 
 ## Square RTC purchase flow
 

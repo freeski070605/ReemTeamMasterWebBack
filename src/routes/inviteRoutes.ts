@@ -6,32 +6,9 @@ import Table from '../models/Table';
 import authMiddleware from '../middleware/auth';
 import { sendInviteEmail } from '../utils/email';
 import User from '../models/User';
+import { resolveFrontendBaseUrl } from '../config/frontend';
 
 const router = Router();
-
-const resolveFrontendBaseUrl = (req?: Request) => {
-  const explicit = (process.env.FRONTEND_URL || '').trim();
-  if (explicit) {
-    return explicit.replace(/\/+$/, '');
-  }
-
-  const originHeader = typeof req?.headers.origin === 'string' ? req.headers.origin : '';
-  if (originHeader) {
-    return originHeader.replace(/\/+$/, '');
-  }
-
-  const refererHeader = typeof req?.headers.referer === 'string' ? req.headers.referer : '';
-  if (refererHeader) {
-    try {
-      const url = new URL(refererHeader);
-      return `${url.protocol}//${url.host}`;
-    } catch {
-      // fall through
-    }
-  }
-
-  return 'http://localhost:3000';
-};
 
 const buildInviteUrl = (code: string, req?: Request) =>
   `${resolveFrontendBaseUrl(req)}/invite/${code}`;

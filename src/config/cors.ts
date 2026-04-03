@@ -1,27 +1,9 @@
+import { isAllowedFrontendOrigin } from './frontend';
+
 type OriginCallback = (error: Error | null, allow?: boolean) => void;
 
-const normalizeOrigin = (value: string) => value.replace(/\/+$/, "");
-
-const getAllowedOrigins = () => {
-  const raw =
-    process.env.FRONTEND_URLS ||
-    process.env.FRONTEND_URL ||
-    "http://localhost:3000";
-
-  return raw
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map(normalizeOrigin);
-};
-
-const isAllowedOrigin = (origin?: string) => {
-  if (!origin) return true;
-  return getAllowedOrigins().includes(normalizeOrigin(origin));
-};
-
 const corsOrigin = (origin: string | undefined, callback: OriginCallback) => {
-  if (isAllowedOrigin(origin)) {
+  if (isAllowedFrontendOrigin(origin)) {
     callback(null, true);
     return;
   }
@@ -32,10 +14,12 @@ const corsOrigin = (origin: string | undefined, callback: OriginCallback) => {
 export const corsOptions = {
   origin: corsOrigin,
   credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  optionsSuccessStatus: 204,
 };
 
 export const socketCorsOptions = {
   origin: corsOrigin,
-  methods: ["GET", "POST"],
+  methods: ['GET', 'POST'],
   credentials: true,
 };

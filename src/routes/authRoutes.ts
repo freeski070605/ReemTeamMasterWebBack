@@ -9,6 +9,7 @@ import { ensureWalletForUser } from '../services/walletProvisioningService';
 import { resolveUserRole, roleAtLeast } from '../constants/roles';
 import { sendPasswordResetEmail } from '../utils/email';
 import { buildVipPayload } from '../utils/vip';
+import { resolveFrontendBaseUrl } from '../config/frontend';
 
 dotenv.config();
 
@@ -32,24 +33,6 @@ const PASSWORD_RESET_REQUEST_MESSAGE =
 const normalizeEmail = (value: unknown) => (
   typeof value === 'string' ? value.trim().toLowerCase() : ''
 );
-
-const getFrontendBaseUrl = () => {
-  const configured = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || '')
-    .split(',')
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-
-  const preferredUrl = configured.find((value) => {
-    try {
-      const parsed = new URL(value);
-      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-    } catch {
-      return false;
-    }
-  });
-
-  return (preferredUrl || 'http://localhost:3000').replace(/\/+$/, '');
-};
 
 const createPasswordResetToken = () => {
   const token = randomBytes(32).toString('hex');
@@ -198,7 +181,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
       user.passwordResetExpiresAt = expiresAt;
       await user.save();
 
-      const resetLink = `${getFrontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
+      const resetLink = `${resolveFrontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
 
       if (process.env.NODE_ENV !== 'production') {
         console.log(`[auth] Password reset link for ${normalizedEmail}: ${resetLink}`);

@@ -4,6 +4,7 @@ import {
   SquareError as ApiError
 } from "square";
 import dotenv from 'dotenv';
+import { getPrimaryFrontendUrl } from '../config/frontend';
 
 dotenv.config();
 
@@ -15,7 +16,7 @@ const CURRENT_SQUARE_ENVIRONMENT = rawSquareEnvironment === 'production'
 const SQUARE_ENVIRONMENT = rawSquareEnvironment === 'production'
   ? SquareEnvironment.Production
   : SquareEnvironment.Sandbox;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const FRONTEND_URL = getPrimaryFrontendUrl();
 
 if (!SQUARE_ACCESS_TOKEN) {
   console.warn('SQUARE_ACCESS_TOKEN is not set. Square API functionality will be limited.');

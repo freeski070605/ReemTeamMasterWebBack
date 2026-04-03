@@ -7,33 +7,10 @@ import User from '../models/User';
 import { resolveUserRole, roleAtLeast } from '../constants/roles';
 import { isVipActive } from '../utils/vip';
 import { GameMode } from '../domain/gameMode';
+import { resolveFrontendBaseUrl } from '../config/frontend';
 
 const PRIVATE_RTC_STAKE_OPTIONS = [1, 5, 10, 25, 50];
 const PRIVATE_USD_STAKE_OPTIONS = [5, 10, 20, 50, 100];
-
-const resolveFrontendBaseUrl = (req: express.Request) => {
-  const explicit = (process.env.FRONTEND_URL || '').trim();
-  if (explicit) {
-    return explicit.replace(/\/+$/, '');
-  }
-
-  const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : '';
-  if (originHeader) {
-    return originHeader.replace(/\/+$/, '');
-  }
-
-  const refererHeader = typeof req.headers.referer === 'string' ? req.headers.referer : '';
-  if (refererHeader) {
-    try {
-      const url = new URL(refererHeader);
-      return `${url.protocol}//${url.host}`;
-    } catch {
-      // fall through
-    }
-  }
-
-  return 'http://localhost:3000';
-};
 
 const router = express.Router();
 

@@ -100,12 +100,15 @@ router.get('/avatar/:userId', async (req: Request, res: Response) => {
     }
 
     const user = await User.findById(userId)
-      .select('avatarImageData avatarImageContentType avatarImageUpdatedAt')
-      .lean();
+      .select('avatarImageData avatarImageContentType avatarImageUpdatedAt');
 
     if (!user?.avatarImageData || !user?.avatarImageContentType) {
       return res.redirect(302, '/avatars/default.svg');
     }
+
+    const avatarBuffer = Buffer.isBuffer(user.avatarImageData)
+      ? user.avatarImageData
+      : Buffer.from(user.avatarImageData);
 
     if (user.avatarImageUpdatedAt) {
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
@@ -115,7 +118,7 @@ router.get('/avatar/:userId', async (req: Request, res: Response) => {
     }
 
     res.setHeader('Content-Type', user.avatarImageContentType);
-    return res.status(200).send(user.avatarImageData);
+    return res.status(200).send(avatarBuffer);
   } catch (error) {
     console.error('Failed to serve avatar image', error);
     return res.redirect(302, '/avatars/default.svg');

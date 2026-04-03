@@ -11,7 +11,7 @@ router.get('/overview', async (_req: Request, res: Response) => {
   try {
     const [tables, contests, feed] = await Promise.all([
       Table.find()
-        .select('name stake mode isPrivate currentPlayerCount maxPlayers status activeContestId')
+        .select('name stake mode isPrivate isPromo currentPlayerCount maxPlayers status activeContestId')
         .lean(),
       Contest.find()
         .select('contestId mode entryFee playerCount prizePool status participants')
@@ -19,8 +19,10 @@ router.get('/overview', async (_req: Request, res: Response) => {
       buildRgeFeed(7),
     ]);
 
+    const visibleTables = tables.filter((table) => !table.isPromo);
+
     const featuredTable =
-      [...tables].sort((a, b) => {
+      [...visibleTables].sort((a, b) => {
         if (a.status !== b.status) {
           return a.status === 'in-game' ? -1 : 1;
         }
@@ -61,11 +63,11 @@ router.get('/overview', async (_req: Request, res: Response) => {
     res.status(200).json({
       generatedAt: feed.generatedAt,
       tableSummary: {
-        totalTables: tables.length,
-        activeTables: tables.filter((table) => table.status === 'in-game').length,
-        rtcTables: tables.filter((table) => table.mode !== 'USD_CONTEST' && !table.isPrivate).length,
-        cashTables: tables.filter((table) => table.mode === 'USD_CONTEST').length,
-        privateTables: tables.filter((table) => !!table.isPrivate).length,
+        totalTables: visibleTables.length,
+        activeTables: visibleTables.filter((table) => table.status === 'in-game').length,
+        rtcTables: visibleTables.filter((table) => table.mode !== 'USD_CONTEST' && !table.isPrivate).length,
+        cashTables: visibleTables.filter((table) => table.mode === 'USD_CONTEST').length,
+        privateTables: visibleTables.filter((table) => !!table.isPrivate).length,
       },
       contestSummary: {
         totalContests: contests.length,

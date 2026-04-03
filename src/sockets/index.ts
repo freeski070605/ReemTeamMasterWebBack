@@ -17,6 +17,7 @@ import { PresenceService } from "../services/presenceService";
 import { RecentPlayerService } from "../services/recentPlayerService";
 import { resolveUserRole, roleAtLeast } from "../constants/roles";
 import { getAiAvatarUrl, getPromoAiProfile } from "../constants/promoAi";
+import { isVipActive } from "../utils/vip";
 
 // Define a type for our socket with custom properties
 interface CustomSocket extends Socket {
@@ -1286,6 +1287,13 @@ const setupSocketHandlers = (io: Server) => {
       if (!table) {
         return socket.emit("gameError", { message: "Table not found." });
       }
+      const joiningUser = await User.findById(userId).select("role isAdmin vipStatus vipExpiresAt");
+      if (!joiningUser) {
+        return socket.emit("gameError", { message: "User not found." });
+      }
+      const joiningUserRole = resolveUserRole(joiningUser.role, !!joiningUser.isAdmin);
+      const hasPrivateVipBypass = roleAtLeast(joiningUserRole, "admin");
+      const joiningUserIsVip = isVipActive(joiningUser.vipStatus, joiningUser.vipExpiresAt);
       const tableMode = (table.mode as GameMode | undefined)
         ?? ((contestId || table.activeContestId) ? GameMode.USD_CONTEST : GameMode.FREE_RTC_TABLE);
       console.log(`DEBUG: joinTable: tableId=${tableId}, userId=${userId}, isPromo=${table.isPromo}, spectator=${!!spectator}`);
@@ -1331,6 +1339,12 @@ const setupSocketHandlers = (io: Server) => {
       // Check if player is already in the table
       const existingPlayer = table.players.find(p => p.userId.toString() === userId);
       const isOwner = table.createdBy?.toString() === userId;
+
+      if (table.isPrivate && !hasPrivateVipBypass && !joiningUserIsVip) {
+        return socket.emit("gameError", {
+          message: "VIP membership is required to access private tables.",
+        });
+      }
 
       if (existingPlayer) {
         console.log(`User ${username} (${userId}) is already in table ${tableId}. Rejoining.`);

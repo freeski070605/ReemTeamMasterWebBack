@@ -14,6 +14,7 @@ import Wallet from '../models/Wallet';
 import Transaction from '../models/Transaction';
 import WithdrawalRequest from '../models/WithdrawalRequest';
 import Table from '../models/Table';
+import Invite from '../models/Invite';
 import Match from '../models/Match';
 import Contest from '../models/Contest';
 import AdminAudit from '../models/AdminAudit';
@@ -156,7 +157,10 @@ const serializeAdminTable = async (table: any) => {
     mode: table.mode,
     stake: table.stake,
     status: table.status,
+    isPrivate: !!table.isPrivate,
     isPromo: !!table.isPromo,
+    createdBy: table.createdBy?.toString?.() ?? null,
+    hostNote: table.hostNote ?? null,
     minPlayers: table.minPlayers,
     maxPlayers: table.maxPlayers,
     currentPlayerCount: table.currentPlayerCount,
@@ -1272,6 +1276,86 @@ router.post(
       return res.status(200).json(table);
     } catch (error: any) {
       return res.status(500).json({ message: error?.message || 'Failed to reset table.' });
+    }
+  }
+);
+
+router.delete(
+  '/tables/:tableId',
+  requireAdmin,
+  auditLogger({
+    action: 'table.delete',
+    targetType: 'table',
+    resolveTargetId: (req) => getRouteParam(req.params.tableId),
+    captureBefore: async (req) => {
+      const tableId = getRouteParam(req.params.tableId);
+      if (!isObjectId(tableId)) return null;
+
+      const table = await Table.findById(tableId);
+      return table
+        ? {
+            name: table.name,
+            mode: table.mode,
+            stake: table.stake,
+            status: table.status,
+            isPrivate: !!table.isPrivate,
+            isPromo: !!table.isPromo,
+            currentPlayerCount: table.currentPlayerCount,
+            playerCount: Array.isArray(table.players) ? table.players.length : 0,
+            currentMatchId: table.currentMatchId?.toString?.() ?? null,
+          }
+        : null;
+    },
+    captureAfter: (_req, res) => res.locals.auditAfterState ?? null,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const tableId = getRouteParam(req.params.tableId);
+      if (!isObjectId(tableId)) {
+        return res.status(400).json({ message: 'Invalid table id.' });
+      }
+
+      const table = await Table.findById(tableId);
+      if (!table) {
+        return res.status(404).json({ message: 'Table not found.' });
+      }
+
+      if (!table.isPrivate || table.isPromo) {
+        return res.status(400).json({ message: 'Only non-promo private tables can be deleted from admin.' });
+      }
+
+      const gameState = await loadGameState(tableId);
+      const hasGamePlayers = Array.isArray(gameState?.players) && gameState.players.length > 0;
+      const hasSeatedPlayers = Array.isArray(table.players) && table.players.length > 0;
+      const isEmpty = table.currentPlayerCount === 0 && !hasSeatedPlayers && !hasGamePlayers;
+
+      if (!isEmpty || table.status !== 'waiting' || table.currentMatchId) {
+        return res.status(400).json({ message: 'Only empty private tables can be deleted.' });
+      }
+
+      const inviteDeleteResult = await Invite.deleteMany({ tableId: table._id });
+      await Promise.all([
+        redisClient.del(`table:${tableId}`),
+        redisClient.del(`table:${tableId}:players`),
+        redisClient.del(`table:${tableId}:players:leaving`),
+        redisClient.del(`game:${tableId}`),
+        redisClient.del(`lock:table:${tableId}`),
+      ]);
+      await table.deleteOne();
+
+      res.locals.auditAfterState = {
+        deleted: true,
+        tableId,
+        invitesDeleted: inviteDeleteResult.deletedCount ?? 0,
+      };
+
+      return res.status(200).json({
+        success: true,
+        tableId,
+        invitesDeleted: inviteDeleteResult.deletedCount ?? 0,
+      });
+    } catch (error: any) {
+      return res.status(500).json({ message: error?.message || 'Failed to delete table.' });
     }
   }
 );

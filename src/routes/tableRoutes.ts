@@ -14,6 +14,51 @@ const PRIVATE_USD_STAKE_OPTIONS = [5, 10, 20, 50, 100];
 
 const router = express.Router();
 
+const isInviteUsable = (invite: any) => {
+  if (!invite) {
+    return false;
+  }
+
+  const expired = invite.expiresAt && invite.expiresAt.getTime() <= Date.now();
+  const maxed = invite.maxUses > 0 && invite.uses >= invite.maxUses;
+  return !expired && !maxed;
+};
+
+const serializeOwnedPrivateTable = async (table: any, req: express.Request) => {
+  const invites = await Invite.find({ tableId: table._id, purpose: 'table' })
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .select('code expiresAt maxUses uses');
+  const activeInvite = invites.find((invite) => isInviteUsable(invite));
+
+  return {
+    _id: table._id.toString(),
+    name: table.name,
+    stake: table.stake,
+    mode: table.mode,
+    isPrivate: !!table.isPrivate,
+    isPromo: !!table.isPromo,
+    createdBy: table.createdBy?.toString?.() ?? null,
+    hostNote: table.hostNote ?? null,
+    minPlayers: table.minPlayers,
+    maxPlayers: table.maxPlayers,
+    currentPlayerCount: table.currentPlayerCount,
+    players: Array.isArray(table.players)
+      ? table.players.map((player: any) => ({
+          userId: player.userId?.toString?.() ?? player.userId,
+          isAI: !!player.isAI,
+          seat: player.seat,
+        }))
+      : [],
+    status: table.status,
+    createdAt: table.createdAt,
+    updatedAt: table.updatedAt,
+    inviteCode: activeInvite?.code ?? null,
+    inviteUrl: activeInvite ? `${resolveFrontendBaseUrl(req)}/invite/${activeInvite.code}` : null,
+    inviteExpiresAt: activeInvite?.expiresAt ?? null,
+  };
+};
+
 // GET /api/tables
 router.get('/', async (req, res) => {
   try {
@@ -58,6 +103,31 @@ router.post('/quick-seat', async (req, res) => {
   } catch (error) {
     console.error('Error finding quick seat:', error);
     return res.status(500).json({ message: 'Server error finding quick seat.' });
+  }
+});
+
+// GET /api/tables/private/mine
+router.get('/private/mine', authMiddleware, async (req, res) => {
+  try {
+    const userId = (req.user as any)?.id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized: User ID not found.' });
+    }
+
+    const tables = await Table.find({
+      createdBy: userId,
+      isPrivate: true,
+      isPromo: { $ne: true },
+    }).sort({ updatedAt: -1, createdAt: -1 });
+
+    const serialized = await Promise.all(tables.map((table) => serializeOwnedPrivateTable(table, req)));
+    return res.status(200).json({
+      total: serialized.length,
+      tables: serialized,
+    });
+  } catch (error) {
+    console.error('Error loading owned private tables:', error);
+    return res.status(500).json({ message: 'Server error loading private tables.' });
   }
 });
 

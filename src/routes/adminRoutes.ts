@@ -25,6 +25,7 @@ import { redisClient } from '../config/redis';
 import { USER_ROLES, isUserRole, resolveUserRole, roleAtLeast } from '../constants/roles';
 import { GameMode } from '../domain/gameMode';
 import { PROMO_AI_NAMES, getPromoAiProfile } from '../constants/promoAi';
+import { buildVipPayload, resolveVipExpiry } from '../utils/vip';
 
 const router = Router();
 
@@ -95,18 +96,25 @@ const toPagination = (req: Request) => {
   return { page, limit, skip: (page - 1) * limit };
 };
 
-const serializeUser = (user: any) => ({
-  id: user._id.toString(),
-  username: user.username,
-  email: user.email,
-  avatarUrl: user.avatarUrl ?? null,
-  role: resolveUserRole(user.role, !!user.isAdmin),
-  isBanned: !!user.isBanned,
-  isFrozen: !!user.isFrozen,
-  adminNotes: Array.isArray(user.adminNotes) ? user.adminNotes : [],
-  createdAt: user.createdAt,
-  updatedAt: user.updatedAt,
-});
+const serializeUser = (user: any) => {
+  const vipPayload = buildVipPayload(user);
+  return {
+    id: user._id.toString(),
+    username: user.username,
+    email: user.email,
+    avatarUrl: user.avatarUrl ?? null,
+    role: resolveUserRole(user.role, !!user.isAdmin),
+    isVip: vipPayload.isVip,
+    vipStatus: vipPayload.vipStatus,
+    vipSince: user.vipSince ?? null,
+    vipExpiresAt: vipPayload.vipExpiresAt,
+    isBanned: !!user.isBanned,
+    isFrozen: !!user.isFrozen,
+    adminNotes: Array.isArray(user.adminNotes) ? user.adminNotes : [],
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+  };
+};
 
 const serializeWallet = (wallet: any) => ({
   userId: wallet.userId?.toString?.() ?? wallet.userId,
@@ -345,7 +353,7 @@ router.get('/users/search', requireAdmin, async (req: Request, res: Response) =>
     const query = buildUserSearchQuery(q);
 
     const users = await User.find(query)
-      .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt')
+      .select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes createdAt updatedAt')
       .sort({ createdAt: -1 })
       .limit(MAX_USER_SEARCH_RESULTS);
 
@@ -367,7 +375,7 @@ router.get('/users/:id', requireAdmin, async (req: Request, res: Response) => {
     }
 
     const user = await User.findById(id)
-      .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt');
+      .select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes createdAt updatedAt');
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
     }
@@ -398,7 +406,7 @@ router.patch(
       const targetId = getRouteParam(req.params.id);
       if (!isObjectId(targetId)) return null;
       const user = await User.findById(targetId)
-        .select('role isBanned isFrozen adminNotes updatedAt');
+        .select('role isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes updatedAt');
       return user
         ? {
             role: resolveUserRole(user.role, !!user.isAdmin),
@@ -424,7 +432,7 @@ router.patch(
       }
 
       const user = await User.findById(id)
-        .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt');
+        .select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes createdAt updatedAt');
       if (!user) {
         return res.status(404).json({ message: 'User not found.' });
       }
@@ -461,7 +469,7 @@ router.patch(
       const targetId = getRouteParam(req.params.id);
       if (!isObjectId(targetId)) return null;
       const user = await User.findById(targetId)
-        .select('role isBanned isFrozen adminNotes updatedAt');
+        .select('role isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes updatedAt');
       return user
         ? {
             role: resolveUserRole(user.role, !!user.isAdmin),
@@ -487,7 +495,7 @@ router.patch(
       }
 
       const user = await User.findById(id)
-        .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt');
+        .select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes createdAt updatedAt');
       if (!user) {
         return res.status(404).json({ message: 'User not found.' });
       }
@@ -524,7 +532,7 @@ router.patch(
       const targetId = getRouteParam(req.params.id);
       if (!isObjectId(targetId)) return null;
       const user = await User.findById(targetId)
-        .select('role isBanned isFrozen adminNotes updatedAt');
+        .select('role isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes updatedAt');
       return user
         ? {
             role: resolveUserRole(user.role, !!user.isAdmin),
@@ -554,7 +562,7 @@ router.patch(
       }
 
       const user = await User.findById(id)
-        .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt');
+        .select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes createdAt updatedAt');
       if (!user) {
         return res.status(404).json({ message: 'User not found.' });
       }
@@ -578,12 +586,107 @@ router.patch(
   }
 );
 
+router.patch(
+  '/users/:id/vip',
+  requireAdmin,
+  auditLogger({
+    action: 'user.vip.toggle',
+    targetType: 'user',
+    resolveTargetId: (req) => getRouteParam(req.params.id),
+    captureBefore: async (req) => {
+      const targetId = getRouteParam(req.params.id);
+      if (!isObjectId(targetId)) return null;
+      const user = await User.findById(targetId)
+        .select('role vipStatus vipSince vipExpiresAt adminNotes updatedAt');
+      if (!user) return null;
+      const vipPayload = buildVipPayload(user);
+      return {
+        role: resolveUserRole(user.role, !!user.isAdmin),
+        isVip: vipPayload.isVip,
+        vipStatus: vipPayload.vipStatus,
+        vipSince: user.vipSince ?? null,
+        vipExpiresAt: vipPayload.vipExpiresAt,
+        adminNotesCount: (user.adminNotes || []).length,
+        updatedAt: user.updatedAt,
+      };
+    },
+    captureAfter: (_req, res) => res.locals.auditAfterState ?? null,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const id = getRouteParam(req.params.id);
+      if (!isObjectId(id)) {
+        return res.status(400).json({ message: 'Invalid user id.' });
+      }
+
+      const actor = await getAuthenticatedAdminUser(req);
+      if (!actor) {
+        return res.status(401).json({ message: 'Unauthorized.' });
+      }
+
+      const user = await User.findById(id)
+        .select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes createdAt updatedAt');
+      if (!user) {
+        return res.status(404).json({ message: 'User not found.' });
+      }
+
+      if (typeof req.body?.isVip !== 'boolean') {
+        return res.status(400).json({ message: 'isVip must be provided as a boolean.' });
+      }
+
+      const requestedIsVip = req.body.isVip === true;
+      const rawExpiry = req.body?.vipExpiresAt;
+      const hasExplicitExpiry =
+        rawExpiry !== undefined &&
+        rawExpiry !== null &&
+        String(rawExpiry).trim() !== '';
+      const resolvedExpiry = hasExplicitExpiry ? resolveVipExpiry(rawExpiry) : null;
+
+      if (hasExplicitExpiry && !resolvedExpiry) {
+        return res.status(400).json({ message: 'vipExpiresAt must be a valid date.' });
+      }
+
+      if (requestedIsVip) {
+        user.vipStatus = 'ACTIVE';
+        user.vipExpiresAt = resolvedExpiry;
+        if (!user.vipSince) {
+          user.vipSince = new Date();
+        }
+      } else {
+        user.vipStatus = 'DEACTIVATED';
+        user.vipExpiresAt = null;
+      }
+
+      appendAdminNote(
+        user,
+        req.body?.note || `VIP ${requestedIsVip ? 'granted' : 'removed'} by admin.`,
+        actor.username
+      );
+      await user.save();
+
+      const payload = serializeUser(user);
+      res.locals.auditAfterState = {
+        role: payload.role,
+        isVip: payload.isVip,
+        vipStatus: payload.vipStatus,
+        vipSince: payload.vipSince,
+        vipExpiresAt: payload.vipExpiresAt,
+        adminNotesCount: payload.adminNotes.length,
+        updatedAt: payload.updatedAt,
+      };
+      return res.status(200).json(payload);
+    } catch (error: any) {
+      return res.status(500).json({ message: error?.message || 'Failed to update VIP status.' });
+    }
+  }
+);
+
 router.get('/wallets/search', requireFinance, async (req: Request, res: Response) => {
   try {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     const query = buildUserSearchQuery(q);
     const users = await User.find(query)
-      .select('username email avatarUrl role isAdmin isBanned isFrozen adminNotes createdAt updatedAt')
+      .select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt adminNotes createdAt updatedAt')
       .sort({ createdAt: -1 })
       .limit(MAX_USER_SEARCH_RESULTS);
 
@@ -615,7 +718,7 @@ router.get('/wallets/:userId', requireFinance, async (req: Request, res: Respons
     }
 
     const [user, wallet, transactions] = await Promise.all([
-      User.findById(userId).select('username email avatarUrl role isAdmin isBanned isFrozen'),
+      User.findById(userId).select('username email avatarUrl role isAdmin isBanned isFrozen vipStatus vipSince vipExpiresAt'),
       ensureWalletForUser(userId),
       Transaction.find({ userId: toObjectId(userId) }).sort({ date: -1 }).limit(100),
     ]);

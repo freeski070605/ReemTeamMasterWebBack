@@ -5,7 +5,7 @@ import { UserRole } from '../constants/roles';
 dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretjwtkey';
-const JWT_EXPIRES_IN = '1h'; // Token expires in 1 hour
+const JWT_EXPIRES_IN = (process.env.JWT_EXPIRES_IN || '1h') as jwt.SignOptions['expiresIn'];
 
 export interface ITokenPayload {
   id: string;

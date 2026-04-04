@@ -31,6 +31,36 @@ const userSchema = new Schema({
     type: Date,
     default: null,
   },
+  refreshSessions: {
+    type: [{
+      tokenHash: {
+        type: String,
+        required: true,
+      },
+      expiresAt: {
+        type: Date,
+        required: true,
+      },
+      persistent: {
+        type: Boolean,
+        required: true,
+        default: true,
+      },
+      userAgent: {
+        type: String,
+        default: null,
+      },
+      createdAt: {
+        type: Date,
+        default: Date.now,
+      },
+      lastUsedAt: {
+        type: Date,
+        default: Date.now,
+      },
+    }],
+    default: [],
+  },
   avatarUrl: {
     type: String,
     default: '/avatars/default.svg',

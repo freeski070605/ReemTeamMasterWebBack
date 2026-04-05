@@ -31,9 +31,11 @@ interface CustomSocket extends Socket {
 const ROUND_READY_DURATION_MS = 30000;
 const PROMO_ROUND_READY_DURATION_MS = 20000;
 const TURN_DURATION_MS = DEFAULT_TURN_DURATION_MS;
+const AI_ACTION_DELAY_MS = 1800;
 const PROMO_AI_COUNT = 4;
 const roundTransitionTimers = new Map<string, NodeJS.Timeout>();
 const turnExpiryTimers = new Map<string, NodeJS.Timeout>();
+const aiTurnTimers = new Map<string, { timer: NodeJS.Timeout; turn: number; playerId: string }>();
 const roundCurrency = (value: number): number => Math.round(value * 100) / 100;
 const LOBBY_ROOM = "lobby";
 let lastPresenceBroadcastAt = 0;
@@ -100,6 +102,13 @@ const clearTurnExpiryTimer = (tableId: string) => {
   if (!timer) return;
   clearTimeout(timer);
   turnExpiryTimers.delete(tableId);
+};
+
+const clearAiTurnTimer = (tableId: string) => {
+  const scheduled = aiTurnTimers.get(tableId);
+  if (!scheduled) return;
+  clearTimeout(scheduled.timer);
+  aiTurnTimers.delete(tableId);
 };
 
 const resolveTurnDurationMs = (gameState: IGameState): number => {
@@ -598,6 +607,7 @@ const canAutoDeclare41 = (player: IGameState["players"][number] | undefined): bo
 const runTurnLoop = (io: Server, tableId: string, gameState: IGameState) => {
   if (gameState.status !== "in-progress") {
     clearTurnExpiryTimer(tableId);
+    clearAiTurnTimer(tableId);
     return;
   }
 
@@ -649,6 +659,8 @@ const runTurnLoop = (io: Server, tableId: string, gameState: IGameState) => {
   scheduleTurnExpiryTimer(io, tableId, gameState);
   if (gameState.players[gameState.currentPlayerIndex]?.isAI) {
     handleAITurn(io, tableId);
+  } else {
+    clearAiTurnTimer(tableId);
   }
 };
 
@@ -1018,19 +1030,35 @@ const handleAITurn = async (io: Server, tableId: string) => {
     if (!gameState) return;
 
     const currentPlayer = gameState.players[gameState.currentPlayerIndex];
-    if (!currentPlayer || !currentPlayer.isAI) return;
+    if (!currentPlayer || !currentPlayer.isAI) {
+      clearAiTurnTimer(tableId);
+      return;
+    }
+
+    const scheduledTurn = aiTurnTimers.get(tableId);
+    if (
+      scheduledTurn &&
+      scheduledTurn.turn === gameState.turn &&
+      scheduledTurn.playerId === currentPlayer.userId
+    ) {
+      return;
+    }
+
+    clearAiTurnTimer(tableId);
 
     console.log(`[AI] Starting turn for ${currentPlayer.username} (${currentPlayer.userId})`);
 
-    // Small delay for realism
-    setTimeout(async () => {
+    // Keep AI actions readable to humans and avoid stacking duplicate schedules.
+    const timer = setTimeout(async () => {
+      aiTurnTimers.delete(tableId);
+
       // Reload state in case something changed
       gameState = await loadGameState(tableId);
       if (!gameState) return;
 
       // Double check it's still AI turn
       const currentNow = gameState.players[gameState.currentPlayerIndex];
-      if (currentNow.userId !== currentPlayer.userId) return;
+      if (!currentNow || currentNow.userId !== currentPlayer.userId || !currentNow.isAI) return;
 
       try {
         const aiAction = getAIPlayerAction(gameState, currentPlayer.userId);
@@ -1114,7 +1142,13 @@ const handleAITurn = async (io: Server, tableId: string) => {
       } catch (e) {
           console.error("Error in AI turn:", e);
       }
-    }, 1000);
+    }, AI_ACTION_DELAY_MS);
+
+    aiTurnTimers.set(tableId, {
+      timer,
+      turn: gameState.turn,
+      playerId: currentPlayer.userId,
+    });
   } catch (err) {
       console.error("Error setting up AI turn:", err);
   }

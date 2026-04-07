@@ -20,6 +20,7 @@ interface AIHitChoice {
 
 const RANK_ORDER: CardRank[] = ['Ace', '2', '3', '4', '5', '6', '7', 'Jack', 'Queen', 'King'];
 const DISCARD_PICKUP_MARGIN = 14;
+const MAX_AI_DROP_HAND_VALUE = 17;
 
 const getCardId = (card: Card): string => `${card.rank}-${card.suit}`;
 
@@ -428,6 +429,10 @@ const canSafelyDrop = (gameState: IGameState, aiPlayerId: string): boolean => {
   }
 
   const aiHandValue = calculateHandValue(aiPlayer.hand);
+  if (aiHandValue > MAX_AI_DROP_HAND_VALUE) {
+    return false;
+  }
+
   const lowestOpponentScore = gameState.players
     .filter((player) => player.userId !== aiPlayerId)
     .reduce((lowest, player) => Math.min(lowest, calculateHandValue(player.hand)), Number.POSITIVE_INFINITY);

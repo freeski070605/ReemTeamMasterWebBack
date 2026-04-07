@@ -13,6 +13,7 @@ export interface ITransaction {
     paymentId?: string;
     bundleId?: string;
     contestId?: string;
+    reason?: string;
   };
 }
 

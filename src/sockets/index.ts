@@ -1,5 +1,5 @@
 import { Server, Socket } from "socket.io";
-import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, playerDeclare41, findFirstMandatorySpread, nextTurn, IGameState, toEngineRoundResult, DEFAULT_TURN_DURATION_MS, calculateHandValue } from "../game/gameEngine";
+import { initializeGame, loadGameState, saveGameState, playerDrawCard, playerDiscardCard, playerSpreadCards, playerHitSpread, playerDrop, playerDeclare41, findFirstMandatorySpread, nextTurn, IGameState, toEngineRoundResult, DEFAULT_TURN_DURATION_MS, calculateHandValue, reorderPlayerHand } from "../game/gameEngine";
 import { getAIPlayerAction } from "../game/aiPlayer"; // Import AI logic
 import Table, { TableDocument } from "../models/Table"; // Import TableDocument
 import Contest, { ContestDocument } from "../models/Contest";
@@ -1888,6 +1888,21 @@ const setupSocketHandlers = (io: Server) => {
         }
       } else {
         socket.emit("gameError", { message: "No active game state found for this table." });
+      }
+    });
+
+    socket.on("reorderHand", async ({ tableId, userId, handOrder }: { tableId: string; userId: string; handOrder: string[] }) => {
+      let gameState = await loadGameState(tableId);
+      if (!gameState) {
+        return socket.emit("gameError", { message: "No active game state found for this table." });
+      }
+
+      try {
+        const updatedGameState = reorderPlayerHand(gameState, userId, handOrder);
+        await saveGameState(updatedGameState);
+        io.to(tableId).emit("gameStateUpdate", updatedGameState);
+      } catch (error: any) {
+        socket.emit("gameError", { message: error.message });
       }
     });
 

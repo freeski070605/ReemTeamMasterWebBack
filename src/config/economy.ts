@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-export const RTC_STARTING_BALANCE = 5000;
+export const RTC_STARTING_BALANCE = 10000;
 export const RTC_DAILY_MINIMUM = 1000;
 export const RTC_REFILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const RTC_STAKE_MULTIPLIER = 1000;

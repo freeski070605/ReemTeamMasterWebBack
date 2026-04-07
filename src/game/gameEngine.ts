@@ -26,6 +26,12 @@ export interface IEngineRoundResult {
   playerCount: number; // The total number of players in the round
 }
 
+type AutomaticWinResult = {
+  winnerId: string;
+  type: 'AUTO_TRIPLE' | 'REGULAR';
+  handValue: number;
+};
+
 // Represents the live state of a game table in Redis
 export interface IGameState {
   tableId: string;
@@ -49,6 +55,8 @@ export interface IGameState {
     lastHitAppliedOnTurn: number | null; // Prevents multiple hits in the same turn from stacking lock
     currentBuyIn: number; // Player's buy-in for the current round
     restrictedDiscardCard: string | null; // Card that cannot be discarded this turn (e.g. if picked from discard pile)
+    handOrder?: string[];
+    handOrderCustomized?: boolean;
   }>;
   deck: Card[];
   discardPile: Card[];
@@ -106,10 +114,13 @@ export const calculateAllHandScores = (players: Array<{ userId: string; hand: Ca
 
 const CARD_RANK_ORDER: CardRank[] = ['Ace', '2', '3', '4', '5', '6', '7', 'Jack', 'Queen', 'King'];
 const CARD_SUIT_ORDER: CardSuit[] = ['Hearts', 'Diamonds', 'Clubs', 'Spades'];
+const REGULAR_OPENING_AUTO_WIN_VALUES = new Set([47, 50]);
 
 const getCardNumericalRank = (rank: CardRank): number => CARD_RANK_ORDER.indexOf(rank);
 
 const getCardSuitOrder = (suit: CardSuit): number => CARD_SUIT_ORDER.indexOf(suit);
+
+export const getCardId = (card: Card): string => `${card.rank}-${card.suit}`;
 
 const sortHandCards = (cards: Card[]): Card[] => {
   return [...cards].sort((a, b) => {
@@ -135,6 +146,56 @@ const sortSpreadCards = (cards: Card[]): Card[] => {
   return sortHandCards(cards);
 };
 
+const normalizeHandOrder = (cards: Card[], handOrder?: string[] | null): string[] => {
+  const cardIds = new Set(cards.map(getCardId));
+  const preservedOrder = (handOrder ?? []).filter((id) => cardIds.has(id));
+  const preservedIds = new Set(preservedOrder);
+  const missingIds = sortHandCards(cards)
+    .map(getCardId)
+    .filter((id) => !preservedIds.has(id));
+
+  return [...preservedOrder, ...missingIds];
+};
+
+const applyHandOrder = (
+  cards: Card[],
+  handOrder?: string[] | null
+): { hand: Card[]; handOrder: string[] } => {
+  const cardById = new Map(cards.map((card) => [getCardId(card), card]));
+  const normalizedOrder = normalizeHandOrder(cards, handOrder);
+
+  return {
+    hand: normalizedOrder
+      .map((id) => cardById.get(id))
+      .filter((card): card is Card => !!card),
+    handOrder: normalizedOrder,
+  };
+};
+
+const getAutoSortedHandState = (cards: Card[]): { hand: Card[]; handOrder: string[]; handOrderCustomized: boolean } => {
+  const hand = sortHandCards(cards);
+  return {
+    hand,
+    handOrder: hand.map(getCardId),
+    handOrderCustomized: false,
+  };
+};
+
+const getPlayerHandState = (
+  cards: Card[],
+  player: { handOrder?: string[]; handOrderCustomized?: boolean },
+  customOrder?: string[]
+): { hand: Card[]; handOrder: string[]; handOrderCustomized: boolean } => {
+  if (player.handOrderCustomized) {
+    return {
+      ...applyHandOrder(cards, customOrder ?? player.handOrder),
+      handOrderCustomized: true,
+    };
+  }
+
+  return getAutoSortedHandState(cards);
+};
+
 const getLowestScoreWinnerId = (
   players: Array<{ userId: string; hand: Card[] }>
 ): { winnerId: string; lowestScore: number } => {
@@ -154,24 +215,40 @@ const getLowestScoreWinnerId = (
 
 /**
  * Checks for automatic opening wins after dealing.
- * Only 11 and under is instant; 41 must be declared at start of player's turn.
+ * 11 and under is instant triple-stake; exact 47/50 are instant regular-stake wins.
+ * 41 must be declared at start of player's turn.
  * @param players The players in the game with their dealt hands.
  * @returns The userId of the winning player and win type, or null if no auto-win.
  */
-export const checkForAutomaticWins = (players: Array<{ userId: string; hand: Card[] }>): { winnerId: string; type: 'AUTO_TRIPLE' } | null => {
-  const eligiblePlayers = players
-    .map((player) => ({ userId: player.userId, handValue: calculateHandValue(player.hand) }))
+export const checkForAutomaticWins = (players: Array<{ userId: string; hand: Card[] }>): AutomaticWinResult | null => {
+  const scoredPlayers = players
+    .map((player) => ({ userId: player.userId, handValue: calculateHandValue(player.hand) }));
+
+  const lowHandWinners = scoredPlayers
     .filter((player) => player.handValue <= 11)
     .sort((a, b) => a.handValue - b.handValue);
 
-  if (eligiblePlayers.length === 0) {
-    return null;
+  if (lowHandWinners.length > 0) {
+    return {
+      winnerId: lowHandWinners[0].userId,
+      type: 'AUTO_TRIPLE',
+      handValue: lowHandWinners[0].handValue,
+    };
   }
 
-  return {
-    winnerId: eligiblePlayers[0].userId,
-    type: 'AUTO_TRIPLE',
-  };
+  const regularOpeningWinners = scoredPlayers
+    .filter((player) => REGULAR_OPENING_AUTO_WIN_VALUES.has(player.handValue))
+    .sort((a, b) => b.handValue - a.handValue);
+
+  if (regularOpeningWinners.length > 0) {
+    return {
+      winnerId: regularOpeningWinners[0].userId,
+      type: 'REGULAR',
+      handValue: regularOpeningWinners[0].handValue,
+    };
+  }
+
+  return null;
 };
 
 /**
@@ -276,17 +353,22 @@ const normalizeTurnTrackingState = (gameState: IGameState): IGameState => {
   const turnDurationMs = gameState.turnDurationMs ?? DEFAULT_TURN_DURATION_MS;
   const turnStartTime = gameState.turnStartTime ?? Date.now();
   const turnExpiresAt = gameState.turnExpiresAt ?? (turnStartTime + turnDurationMs);
-  const players = gameState.players.map((player) => ({
-    ...player,
-    hand: sortHandCards(player.hand),
-    spreads: player.spreads.map(sortSpreadCards),
-    hasDrawnThisTurn: player.hasDrawnThisTurn ?? !!player.hasTakenActionThisTurn,
-    hasDiscardedThisTurn: player.hasDiscardedThisTurn ?? false,
-    hasDrawnAnyCard: player.hasDrawnAnyCard ?? false,
-    startingHandValue: player.startingHandValue ?? calculateHandValue(player.hand),
-    lastHitAppliedOnTurn: player.lastHitAppliedOnTurn ?? null,
-    restrictedDiscardCard: player.restrictedDiscardCard ?? null,
-  }));
+  const players = gameState.players.map((player) => {
+    const orderedHandState = getPlayerHandState(player.hand, player);
+    return {
+      ...player,
+      hand: orderedHandState.hand,
+      handOrder: orderedHandState.handOrder,
+      handOrderCustomized: orderedHandState.handOrderCustomized,
+      spreads: player.spreads.map(sortSpreadCards),
+      hasDrawnThisTurn: player.hasDrawnThisTurn ?? !!player.hasTakenActionThisTurn,
+      hasDiscardedThisTurn: player.hasDiscardedThisTurn ?? false,
+      hasDrawnAnyCard: player.hasDrawnAnyCard ?? false,
+      startingHandValue: player.startingHandValue ?? calculateHandValue(orderedHandState.hand),
+      lastHitAppliedOnTurn: player.lastHitAppliedOnTurn ?? null,
+      restrictedDiscardCard: player.restrictedDiscardCard ?? null,
+    };
+  });
 
   return {
     ...gameState,
@@ -348,6 +430,8 @@ export const initializeGame = async (
       lastHitAppliedOnTurn: null,
       currentBuyIn: 0, // Initial buy-in is 0, handled by handleBuyIn
       restrictedDiscardCard: null,
+      handOrder: hand.map(getCardId),
+      handOrderCustomized: false,
     };
   });
 
@@ -526,12 +610,18 @@ export const playerDrawCard = async (gameState: IGameState, userId: string, sour
   }
 
   newHand.push(drawnCard);
-  const sortedHand = sortHandCards(newHand);
+  const orderedHandState = getPlayerHandState(
+    newHand,
+    player,
+    normalizeHandOrder(newHand, [...(player.handOrder ?? player.hand.map(getCardId)), getCardId(drawnCard)])
+  );
 
   const updatedPlayers = [...gameState.players];
   updatedPlayers[playerIndex] = {
     ...player,
-    hand: sortedHand,
+    hand: orderedHandState.hand,
+    handOrder: orderedHandState.handOrder,
+    handOrderCustomized: orderedHandState.handOrderCustomized,
     hasTakenActionThisTurn: true,
     hasDrawnThisTurn: true,
     hasDiscardedThisTurn: false,
@@ -611,9 +701,13 @@ export const playerDiscardCard = async (gameState: IGameState, userId: string, c
   newHand.splice(cardIndex, 1);
 
   const updatedPlayers = [...gameState.players];
+  const updatedHandOrder = (player.handOrder ?? player.hand.map(getCardId)).filter((id) => id !== cardId);
+  const orderedHandState = getPlayerHandState(newHand, player, updatedHandOrder);
   updatedPlayers[playerIndex] = {
     ...player,
-    hand: sortHandCards(newHand),
+    hand: orderedHandState.hand,
+    handOrder: orderedHandState.handOrder,
+    handOrderCustomized: orderedHandState.handOrderCustomized,
     hasTakenActionThisTurn: true,
     hasDiscardedThisTurn: true,
     restrictedDiscardCard: null,
@@ -787,7 +881,13 @@ export const playerSpreadCards = async (gameState: IGameState, userId: string, c
   // 5. Update player's spread count for the turn
   const updatedPlayer = {
     ...player,
-    hand: sortHandCards(newHand),
+    ...getPlayerHandState(
+      newHand,
+      player,
+      (player.handOrder ?? player.hand.map(getCardId)).filter(
+        (id) => !cardsToSpread.some((card) => getCardId(card) === id)
+      )
+    ),
     spreads: newSpreads,
     hasTakenActionThisTurn: true,
   };
@@ -923,7 +1023,13 @@ export const playerHitSpread = async (
   const updatedPlayers = [...gameState.players];
   const updatedHittingPlayer = {
     ...hittingPlayer,
-    hand: sortHandCards(updatedHittingHand),
+    ...getPlayerHandState(
+      updatedHittingHand,
+      hittingPlayer,
+      (hittingPlayer.handOrder ?? hittingPlayer.hand.map(getCardId)).filter(
+        (id) => id !== getCardId(playedCard)
+      )
+    ),
     hasTakenActionThisTurn: true,
   };
 
@@ -1068,4 +1174,49 @@ export const playerDeclare41 = async (gameState: IGameState, userId: string): Pr
   };
 
   return finalizeRoundState(updatedGameState);
+};
+
+export const reorderPlayerHand = (
+  gameState: IGameState,
+  userId: string,
+  nextHandOrder: string[]
+): IGameState => {
+  const normalizedState = normalizeTurnTrackingState(gameState);
+  const playerIndex = normalizedState.players.findIndex((player) => player.userId === userId);
+  if (playerIndex === -1) {
+    throw new Error(`Player ${userId} not found.`);
+  }
+
+  const player = normalizedState.players[playerIndex];
+  const currentIds = player.hand.map(getCardId);
+  if (currentIds.length !== nextHandOrder.length) {
+    throw new Error("Hand order does not match current hand size.");
+  }
+
+  const currentIdSet = new Set(currentIds);
+  const nextIdSet = new Set(nextHandOrder);
+  if (currentIdSet.size !== nextHandOrder.length || nextIdSet.size !== nextHandOrder.length) {
+    throw new Error("Hand order contains duplicate cards.");
+  }
+
+  if (nextHandOrder.some((id) => !currentIdSet.has(id))) {
+    throw new Error("Hand order contains invalid cards.");
+  }
+
+  const updatedPlayers = [...normalizedState.players];
+  const sortedOrder = sortHandCards(player.hand).map(getCardId);
+  const handOrderCustomized = !nextHandOrder.every((id, index) => id === sortedOrder[index]);
+  const nextHandState = handOrderCustomized
+    ? { ...applyHandOrder(player.hand, nextHandOrder), handOrderCustomized: true }
+    : getAutoSortedHandState(player.hand);
+
+  updatedPlayers[playerIndex] = {
+    ...player,
+    ...nextHandState,
+  };
+
+  return {
+    ...normalizedState,
+    players: updatedPlayers,
+  };
 };

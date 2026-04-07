@@ -4,8 +4,10 @@ import { randomUUID } from 'crypto';
 import authMiddleware from '../middleware/auth';
 import { RTC_PURCHASE_BUNDLES, RtcPurchaseBundle } from '../config/economy';
 import { isSquareAuthFailure, isSquareCatalogObjectNotFoundError } from '../utils/squareErrors';
+import User from '../models/User';
 
 const router = Router();
+const CHECKOUT_DISPLAY_NAME_MAX_LENGTH = 60;
 
 const buildSquareReferenceId = (
   rawUserId: unknown,
@@ -64,6 +66,37 @@ const getAuthenticatedUserId = (req: Request): string => {
   return typeof userId === 'string' ? userId.trim() : String(userId ?? '').trim();
 };
 
+const normalizeCheckoutDisplayName = (rawDisplayName: unknown): string => {
+  if (typeof rawDisplayName !== 'string') {
+    return '';
+  }
+
+  return rawDisplayName
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, CHECKOUT_DISPLAY_NAME_MAX_LENGTH);
+};
+
+const resolveCheckoutDisplayName = async (req: Request, userIdString: string): Promise<string> => {
+  const tokenUsername = normalizeCheckoutDisplayName((req.user as any)?.username);
+  if (tokenUsername) {
+    return tokenUsername;
+  }
+
+  try {
+    const user = await User.findById(userIdString).select('username').lean();
+    const databaseUsername = normalizeCheckoutDisplayName(user?.username);
+    if (databaseUsername) {
+      return databaseUsername;
+    }
+  } catch (error) {
+    console.warn(`Unable to resolve checkout username for user ${userIdString}.`, error);
+  }
+
+  return 'Player';
+};
+
 const getRtcBundle = (bundleId: string) => {
   return RTC_PURCHASE_BUNDLES.find((bundle) => bundle.id === bundleId) || null;
 };
@@ -83,6 +116,7 @@ const buildRtcLineItem = (bundle: RtcPurchaseBundle, includeCatalogObjectId: boo
 const createRtcPaymentLink = async (
   bundle: RtcPurchaseBundle,
   userIdString: string,
+  checkoutDisplayName: string,
   locationId: string,
   frontendBaseUrl: string,
   includeCatalogObjectId: boolean
@@ -94,6 +128,7 @@ const createRtcPaymentLink = async (
       referenceId: buildSquareReferenceId(userIdString, 'rtc_purchase'),
       metadata: {
         userId: userIdString,
+        username: checkoutDisplayName,
         purchaseType: 'rtc_bundle',
         bundleId: bundle.id,
       },
@@ -102,7 +137,7 @@ const createRtcPaymentLink = async (
     checkoutOptions: {
       redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success&paymentType=rtc&bundleId=${encodeURIComponent(bundle.id)}`,
     },
-    paymentNote: `rtc_bundle:${bundle.id}:${userIdString}`,
+    paymentNote: `RTC bundle ${bundle.id} purchase for ${checkoutDisplayName}`,
   });
 };
 
@@ -147,6 +182,7 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
     }
 
     const amountMinor = Math.round(amount * 100);
+    const checkoutDisplayName = await resolveCheckoutDisplayName(req, userIdString);
     const paymentLinkResponse = await squareClient.checkout.paymentLinks.create({
       idempotencyKey: randomUUID(),
       order: {
@@ -154,11 +190,12 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
         referenceId: buildSquareReferenceId(userIdString),
         metadata: {
           userId: userIdString,
+          username: checkoutDisplayName,
           purchaseType: 'usd_deposit',
         },
         lineItems: [
           {
-            name: `Wallet Deposit for User ${userIdString}`,
+            name: `Wallet Deposit for ${checkoutDisplayName}`,
             quantity: '1',
             basePriceMoney: {
               amount: BigInt(amountMinor),
@@ -170,7 +207,7 @@ router.post('/create-checkout', authMiddleware, async (req: Request, res: Respon
       checkoutOptions: {
         redirectUrl: `${frontendBaseUrl}/account?paymentStatus=success&paymentType=usd`,
       },
-      paymentNote: `wallet_deposit:${userIdString}`,
+      paymentNote: `Wallet deposit for ${checkoutDisplayName}`,
     });
 
     const checkoutUrl = paymentLinkResponse.paymentLink?.url;
@@ -213,11 +250,13 @@ router.post('/create-rtc-checkout', authMiddleware, async (req: Request, res: Re
       return res.status(500).json({ message: 'Square location is not configured or accessible for this access token.' });
     }
 
+    const checkoutDisplayName = await resolveCheckoutDisplayName(req, userIdString);
     let paymentLinkResponse;
     try {
       paymentLinkResponse = await createRtcPaymentLink(
         bundle,
         userIdString,
+        checkoutDisplayName,
         locationId,
         frontendBaseUrl,
         true
@@ -230,6 +269,7 @@ router.post('/create-rtc-checkout', authMiddleware, async (req: Request, res: Re
         paymentLinkResponse = await createRtcPaymentLink(
           bundle,
           userIdString,
+          checkoutDisplayName,
           locationId,
           frontendBaseUrl,
           false

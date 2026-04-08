@@ -904,7 +904,10 @@ const executeRoundTransition = async (io: Server, tableId: string) => {
 
     if (humans.length >= table.minPlayers && ais.length > 0) {
       playersWithDetails = humans;
-      table.players = humans.map((h) => ({ userId: new mongoose.Types.ObjectId(h.userId), isAI: false })) as any;
+      // Preserve the seated human records. Rebuilding from display data drops required seat
+      // indexes and can break the next-round transition for players queued during a live hand.
+      table.players = table.players.filter((player) => !player.isAI) as any;
+      table.players.sort((a, b) => (a.seat ?? 0) - (b.seat ?? 0));
       table.currentPlayerCount = humans.length;
 
       for (const ai of ais) {

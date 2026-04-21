@@ -8,11 +8,30 @@ import { resolveUserRole, roleAtLeast } from '../constants/roles';
 import { isVipActive } from '../utils/vip';
 import { GameMode } from '../domain/gameMode';
 import { resolveFrontendBaseUrl } from '../config/frontend';
+import { pickQuickPlayTable } from '../services/quickPlayService';
 
 const PRIVATE_RTC_STAKE_OPTIONS = [1, 5, 10, 25, 50];
 const PRIVATE_USD_STAKE_OPTIONS = [5, 10, 20, 50, 100];
 
 const router = express.Router();
+
+const parseBoolean = (value: unknown, fallback: boolean) => {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+    if (['0', 'false', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return fallback;
+};
 
 const isInviteUsable = (invite: any) => {
   if (!invite) {
@@ -78,6 +97,7 @@ router.get('/', async (req, res) => {
 router.post('/quick-seat', async (req, res) => {
   try {
     const requestedMode = typeof req.body?.mode === 'string' ? req.body.mode : undefined;
+    const beginnerMode = parseBoolean(req.body?.beginnerMode, true);
     const modeFilter = requestedMode && requestedMode !== 'USD_CONTEST'
       ? { mode: requestedMode }
       : { mode: { $ne: 'USD_CONTEST' } };
@@ -85,21 +105,24 @@ router.post('/quick-seat', async (req, res) => {
     const tables = await Table.find({
       ...modeFilter,
       isPrivate: { $ne: true },
+      isPromo: { $ne: true },
       $expr: { $lt: ['$currentPlayerCount', '$maxPlayers'] },
-    });
+    }).select('name stake mode isPrivate isPromo minPlayers maxPlayers currentPlayerCount status players');
 
-    if (tables.length === 0) {
+    const selection = pickQuickPlayTable(tables, { beginnerMode });
+
+    if (!selection.table || !selection.reason) {
       return res.status(404).json({ message: 'No open tables available right now.' });
     }
 
-    const sorted = [...tables].sort((a, b) => {
-      if (a.status !== b.status) return a.status === 'waiting' ? -1 : 1;
-      if (a.currentPlayerCount !== b.currentPlayerCount) return b.currentPlayerCount - a.currentPlayerCount;
-      return a.stake - b.stake;
+    const selected = selection.table;
+    return res.status(200).json({
+      tableId: selected._id,
+      table: selected,
+      reason: selection.reason,
+      beginnerFriendly: selection.beginnerFriendly,
+      availableOpenTables: tables.length,
     });
-
-    const selected = sorted[0];
-    return res.status(200).json({ tableId: selected._id, table: selected });
   } catch (error) {
     console.error('Error finding quick seat:', error);
     return res.status(500).json({ message: 'Server error finding quick seat.' });

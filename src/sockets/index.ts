@@ -1338,17 +1338,9 @@ const setupSocketHandlers = (io: Server) => {
       if (!table.mode) {
         table.mode = tableMode;
       }
+      const activeTable = table;
 
-      if (spectator) {
-        const viewer = await User.findById(userId).select("role isAdmin");
-        const viewerRole = viewer ? resolveUserRole(viewer.role, !!viewer.isAdmin) : "user";
-        if (!viewer || !roleAtLeast(viewerRole, "admin")) {
-          return socket.emit("gameError", { message: "Admin access is required to spectate this table." });
-        }
-        if (!table.isPromo) {
-          return socket.emit("gameError", { message: "Spectator mode is only available for promo tables." });
-        }
-
+      const enterPromoSpectator = async () => {
         socket.join(tableId);
         socket.userId = userId;
         socket.username = username;
@@ -1359,18 +1351,42 @@ const setupSocketHandlers = (io: Server) => {
         void emitLobbyPresence(io);
 
         try {
-          const promoGameState = await ensurePromoGameState(io, table, userId);
+          const promoGameState = await ensurePromoGameState(io, activeTable, userId);
           io.to(socket.id).emit("initialGameState", promoGameState);
           const roundResult = toEngineRoundResult(promoGameState);
           if (roundResult) {
             io.to(socket.id).emit("roundResult", roundResult);
           }
-          return;
+          return true;
         } catch (error: any) {
-          return socket.emit("gameError", {
+          socket.emit("gameError", {
             message: error?.message || "Unable to start promo spectator session.",
           });
+          return true;
         }
+      };
+
+      if (spectator) {
+        const viewer = await User.findById(userId).select("role isAdmin");
+        const viewerRole = viewer ? resolveUserRole(viewer.role, !!viewer.isAdmin) : "user";
+        if (!viewer || !roleAtLeast(viewerRole, "admin")) {
+          return socket.emit("gameError", { message: "Admin access is required to spectate this table." });
+        }
+        if (!activeTable.isPromo) {
+          return socket.emit("gameError", { message: "Spectator mode is only available for promo tables." });
+        }
+
+        await enterPromoSpectator();
+        return;
+      }
+
+      if (activeTable.isPromo) {
+        if (!roleAtLeast(joiningUserRole, "admin")) {
+          return socket.emit("gameError", { message: "Admin access is required to open promo tables." });
+        }
+
+        await enterPromoSpectator();
+        return;
       }
 
       // Check if player is already in the table

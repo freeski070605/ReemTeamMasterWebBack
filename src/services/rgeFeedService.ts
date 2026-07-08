@@ -3,6 +3,7 @@ import Match from '../models/Match';
 import Table from '../models/Table';
 import Transaction from '../models/Transaction';
 import User from '../models/User';
+import { getAiAvatarUrl, getPromoAiProfile } from '../constants/promoAi';
 
 type WindowKey = '24h' | '7d' | '30d';
 
@@ -36,6 +37,14 @@ type PlayerAccumulator = {
   vipStatus: string;
   vipSince: string | null;
   windows: Record<WindowKey, PlayerWindowAccumulator>;
+};
+
+type FeedTablePlayer = {
+  playerId: string;
+  username: string;
+  isAI: boolean;
+  seat: number;
+  avatarUrl?: string;
 };
 
 const windowDurations: Record<WindowKey, number> = {
@@ -142,7 +151,7 @@ const detectPlatforms = (signalType: string) => {
     return ['instagram', 'story'];
   }
 
-  if (signalType.includes('reem') || signalType.includes('streak')) {
+  if (signalType.includes('promo') || signalType.includes('reem') || signalType.includes('streak')) {
     return ['instagram', 'story'];
   }
 
@@ -176,6 +185,43 @@ export const buildRgeFeed = async (days = 30) => {
   const tableById = new Map(tables.map((table) => [toId(table._id), table]));
   const players = new Map<string, PlayerAccumulator>();
   const streaks = new Map<string, Record<WindowKey, { current: number; best: number }>>();
+
+  const tableList = tables.map((table) => {
+    const tablePlayers: FeedTablePlayer[] = (table.players ?? []).map((player: any, index: number) => {
+      const playerId = toId(player.userId);
+      const user = userById.get(playerId);
+      const promoProfile = table.isPromo && player.isAI ? getPromoAiProfile(index) : null;
+
+      return {
+        playerId,
+        username:
+          promoProfile?.username ??
+          user?.username ??
+          (player.isAI ? `AI_${playerId.slice(-4)}` : `Player ${playerId.slice(-4)}`),
+        isAI: !!player.isAI,
+        seat: Number.isInteger(player.seat) ? player.seat : index,
+        avatarUrl: promoProfile?.avatarUrl ?? user?.avatarUrl ?? (player.isAI ? getAiAvatarUrl(playerId) : undefined)
+      };
+    });
+
+    return {
+      tableId: toId(table._id),
+      name: table.name,
+      mode: table.mode,
+      stake: table.stake,
+      status: table.status,
+      isPrivate: !!table.isPrivate,
+      isPromo: !!table.isPromo,
+      minPlayers: table.minPlayers,
+      maxPlayers: table.maxPlayers,
+      currentPlayerCount: table.currentPlayerCount,
+      activeContestId: table.activeContestId ?? null,
+      currentMatchId: table.currentMatchId ? toId(table.currentMatchId) : null,
+      createdAt: table.createdAt?.toISOString?.() ?? null,
+      updatedAt: table.updatedAt?.toISOString?.() ?? null,
+      players: tablePlayers
+    };
+  });
 
   users.forEach((user) => {
     ensurePlayer(players, {
@@ -398,6 +444,45 @@ export const buildRgeFeed = async (days = 30) => {
   ];
 
   const signals: Array<Record<string, unknown>> = [];
+
+  tableList
+    .filter((table) => table.isPromo)
+    .forEach((table) => {
+      const occurredAt = table.updatedAt || new Date().toISOString();
+      const aiPlayers = table.players.filter((player) => player.isAI);
+      const window: WindowKey = isWithinWindow(new Date(occurredAt), now, '24h') ? '24h' : '7d';
+
+      signals.push({
+        signalType: 'promo_table_active',
+        sourceType: 'table',
+        sourceId: table.tableId,
+        tableId: table.tableId,
+        tableName: table.name,
+        matchId: table.currentMatchId ?? '',
+        mode: table.mode || '',
+        stake: table.stake || 0,
+        amount: aiPlayers.length,
+        occurredAt,
+        window,
+        metadata: {
+          isPromo: true,
+          status: table.status,
+          currentPlayerCount: table.currentPlayerCount,
+          minPlayers: table.minPlayers,
+          maxPlayers: table.maxPlayers,
+          aiPlayers,
+          players: table.players
+        },
+        scores: scoreSignal({
+          signalType: 'promo_table_active',
+          amount: aiPlayers.length * 20,
+          stake: table.stake || 0,
+          window,
+          vipBoost: true
+        }),
+        recommendedPlatforms: detectPlatforms('promo_table_active')
+      });
+    });
 
   matches.forEach((match) => {
     const occurredAt = match.endTime || match.updatedAt || match.createdAt;
@@ -690,9 +775,12 @@ export const buildRgeFeed = async (days = 30) => {
     summary: {
       totalPlayers: playerList.length,
       totalCompletedMatches: matches.length,
+      totalTables: tableList.length,
+      totalPromoTables: tableList.filter((table) => table.isPromo).length,
       totalSignals: signals.length
     },
     players: playerList,
+    tables: tableList,
     leaderboards,
     signals: signals.slice(0, 150)
   };

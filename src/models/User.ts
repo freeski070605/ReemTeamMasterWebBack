@@ -144,6 +144,18 @@ const userSchema = new Schema({
     type: [String],
     default: [],
   },
+  tags: {
+    type: [String],
+    default: [],
+  },
+  riskFlags: {
+    type: [String],
+    default: [],
+  },
+  contentSafe: {
+    type: Boolean,
+    default: true,
+  },
   isAdmin: {
     type: Boolean,
     required: true,

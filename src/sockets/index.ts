@@ -28,7 +28,7 @@ interface CustomSocket extends Socket {
   isSpectator?: boolean;
 }
 
-const ROUND_READY_DURATION_MS = 3000;
+const ROUND_READY_DURATION_MS = 25000;
 const PROMO_ROUND_READY_DURATION_MS = 20000;
 const TURN_DURATION_MS = DEFAULT_TURN_DURATION_MS;
 const AI_ACTION_DELAY_MS = 1800;
